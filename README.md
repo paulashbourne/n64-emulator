@@ -46,106 +46,27 @@ npm run dev
 - `npm run build` - type-check and create production build
 - `npm run test` - run Vitest in watch mode
 - `npm run test:run` - run tests once
-- `npm run test:e2e` - run Playwright smoke tests (requires ROM path env var)
+- `npm run test:e2e` - run Playwright smoke tests (fast synthetic ROM fixtures)
 - `npm run coverage` - run tests with coverage output
 - `npm run sync:emulatorjs` - refresh local EmulatorJS runtime/core assets
 
 ## E2E smoke test
 
-Run an end-to-end ROM boot smoke test against a local file:
+All remaining e2e tests are fast and use synthetic ROM buffers (no local ROM directory required):
 
 ```bash
-E2E_ROM_PATH="/absolute/path/to/game.z64" npm run test:e2e -- e2e/rom-boot.smoke.spec.ts
+npm run test:e2e
 ```
 
-Controller mapping smoke test:
-
-```bash
-E2E_ROM_PATH="/absolute/path/to/game.z64" npm run test:e2e -- e2e/controller-wizard.smoke.spec.ts
-```
-
-Controller keyboard preset smoke test:
-
-```bash
-E2E_ROM_PATH="/absolute/path/to/game.z64" npm run test:e2e -- e2e/controller-keyboard-preset.smoke.spec.ts
-```
-
-Boot recovery smoke test:
-
-```bash
-E2E_ROM_PATH="/absolute/path/to/game.z64" npm run test:e2e -- e2e/boot-recovery.smoke.spec.ts
-```
-
-Library removal smoke test:
-
-```bash
-E2E_ROM_PATH="/absolute/path/to/game.z64" npm run test:e2e -- e2e/library-remove.smoke.spec.ts
-```
-
-Play shortcuts smoke test:
-
-```bash
-E2E_ROM_PATH="/absolute/path/to/game.z64" npm run test:e2e -- e2e/play-shortcuts.smoke.spec.ts
-```
-
-Boot mode preference smoke test:
-
-```bash
-E2E_ROM_PATH="/absolute/path/to/game.z64" npm run test:e2e -- e2e/settings-boot-mode.smoke.spec.ts
-```
-
-Resume last played smoke test:
-
-```bash
-E2E_ROM_PATH="/absolute/path/to/game.z64" npm run test:e2e -- e2e/resume-last-played.smoke.spec.ts
-```
-
-Core fallback smoke test:
-
-```bash
-E2E_ROM_PATH="/absolute/path/to/game.z64" npm run test:e2e -- e2e/core-fallback.smoke.spec.ts
-```
-
-Invalid ROM import smoke test:
+Available focused smoke tests:
 
 ```bash
 npm run test:e2e -- e2e/invalid-rom-import.smoke.spec.ts
-```
-
-Mixed valid/invalid import feedback smoke test:
-
-```bash
 npm run test:e2e -- e2e/mixed-import-feedback.smoke.spec.ts
-```
-
-Library sort-by-size smoke test:
-
-```bash
 npm run test:e2e -- e2e/library-size-sort.smoke.spec.ts
-```
-
-Library favorites smoke test:
-
-```bash
 npm run test:e2e -- e2e/library-favorites.smoke.spec.ts
-```
-
-Library sort preference persistence smoke test:
-
-```bash
 npm run test:e2e -- e2e/library-sort-preference.smoke.spec.ts
-```
-
-Duplicate ROM import dedupe smoke test:
-
-```bash
 npm run test:e2e -- e2e/duplicate-import.smoke.spec.ts
-```
-
-Multi-ROM boot stress smoke test (imports first `N` ROMs from a folder, then boots each sequentially):
-
-```bash
-E2E_ROM_DIR="/absolute/path/to/rom-folder" E2E_MULTI_ROM_COUNT=5 npm run test:e2e -- e2e/multi-rom-boot.smoke.spec.ts
 ```
 
 ## Browser support
