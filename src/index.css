@@ -470,6 +470,45 @@ label {
   margin: 0.3rem 0;
 }
 
+.session-status-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+  margin: 0.5rem 0 0.2rem;
+}
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 0.32rem 0.62rem;
+  font-size: 0.88rem;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.status-good {
+  border-color: rgba(46, 196, 182, 0.72);
+  background: rgba(46, 196, 182, 0.17);
+}
+
+.status-warn {
+  border-color: rgba(255, 203, 119, 0.72);
+  background: rgba(255, 203, 119, 0.16);
+}
+
+.status-bad {
+  border-color: rgba(255, 93, 115, 0.72);
+  background: rgba(255, 93, 115, 0.16);
+}
+
+.room-rom-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  align-items: end;
+}
+
 .chat-list {
   list-style: none;
   margin: 0;
@@ -571,5 +610,9 @@ label {
 
   .chat-form {
     grid-template-columns: 1fr;
+  }
+
+  .room-rom-controls {
+    align-items: stretch;
   }
 }

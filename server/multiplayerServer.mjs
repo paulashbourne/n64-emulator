@@ -194,11 +194,11 @@ function handleWsMessage(session, member, rawMessage) {
   }
 
   if (message.type === 'host_rom' && member.isHost) {
-    if (typeof message.romId === 'string') {
-      session.romId = message.romId;
+    if ('romId' in message) {
+      session.romId = typeof message.romId === 'string' ? message.romId : undefined;
     }
-    if (typeof message.romTitle === 'string') {
-      session.romTitle = message.romTitle;
+    if ('romTitle' in message) {
+      session.romTitle = typeof message.romTitle === 'string' ? message.romTitle : undefined;
     }
     broadcastRoomState(session);
     return;
@@ -526,6 +526,10 @@ httpServer.on('upgrade', (req, socket, head) => {
   }
 
   wsServer.handleUpgrade(req, socket, head, (ws) => {
+    if (member.socket && member.socket !== ws && member.socket.readyState === member.socket.OPEN) {
+      member.socket.close(1000, 'Reconnected from another tab');
+    }
+
     member.socket = ws;
     member.connected = true;
     cancelMemberDisconnectTimer(member);
@@ -554,6 +558,10 @@ httpServer.on('upgrade', (req, socket, head) => {
     });
 
     ws.on('close', () => {
+      if (member.socket !== ws) {
+        return;
+      }
+
       if (!sessions.has(session.code)) {
         return;
       }

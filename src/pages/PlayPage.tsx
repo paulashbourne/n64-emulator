@@ -47,6 +47,16 @@ function tryParseSocketMessage(raw: string): MultiplayerSocketMessage | null {
   }
 }
 
+function relayStatusClass(status: 'offline' | 'connecting' | 'connected'): string {
+  if (status === 'connected') {
+    return 'status-pill status-good';
+  }
+  if (status === 'connecting') {
+    return 'status-pill status-warn';
+  }
+  return 'status-pill status-bad';
+}
+
 export function PlayPage() {
   const { romId } = useParams<{ romId: string }>();
   const navigate = useNavigate();
@@ -584,14 +594,15 @@ export function PlayPage() {
           <p>Core: {coreLabel}</p>
           <p>Boot mode: {bootMode === 'auto' ? 'Auto fallback' : bootMode === 'local' ? 'Local cores only' : 'CDN cores only'}</p>
           {onlineRelayEnabled ? (
-            <p>
-              Online relay: {onlineRelayStatus} • Code: {onlineCode} • Players connected: {onlineConnectedMembers}/4 • Remote inputs applied: {onlineRemoteEventsApplied}
-            </p>
-          ) : null}
-          {onlineRelayEnabled ? (
-            <p>
-              Relay latency: {onlineLatencyMs ? `${onlineLatencyMs} ms` : onlineRelayStatus === 'connected' ? 'Measuring…' : 'Unavailable'}
-            </p>
+            <div className="session-status-row">
+              <span className={relayStatusClass(onlineRelayStatus)}>Relay: {onlineRelayStatus}</span>
+              <span className="status-pill">Code: {onlineCode}</span>
+              <span className="status-pill">Players: {onlineConnectedMembers}/4</span>
+              <span className="status-pill">Remote events: {onlineRemoteEventsApplied}</span>
+              <span className={onlineLatencyMs ? (onlineLatencyMs <= 90 ? 'status-pill status-good' : onlineLatencyMs <= 170 ? 'status-pill status-warn' : 'status-pill status-bad') : 'status-pill'}>
+                Latency: {onlineLatencyMs ? `${onlineLatencyMs} ms` : onlineRelayStatus === 'connected' ? 'Measuring…' : 'Unavailable'}
+              </span>
+            </div>
           ) : null}
           {onlineRelayEnabled && onlineLastRemoteInput ? <p>Last remote input: {onlineLastRemoteInput}</p> : null}
           {activeProfile ? <p>Input profile: {activeProfile.name}</p> : <p>No input profile selected.</p>}

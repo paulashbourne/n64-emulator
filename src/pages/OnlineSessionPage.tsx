@@ -14,6 +14,7 @@ import {
   buildSessionPlayUrl,
   buildSessionRoute,
 } from '../online/sessionLinks';
+import { useAppStore } from '../state/appStore';
 import type {
   MultiplayerMember,
   MultiplayerInputPayload,
@@ -21,12 +22,14 @@ import type {
   MultiplayerSocketMessage,
 } from '../types/multiplayer';
 import type { N64ControlTarget } from '../types/input';
+import type { RomRecord } from '../types/rom';
 
 const REMOTE_LOG_LIMIT = 40;
 const SOCKET_RECONNECT_DELAY_MS = 1_500;
 const SOCKET_HEARTBEAT_INTERVAL_MS = 10_000;
 const CHAT_MAX_LENGTH = 280;
 const SESSION_CLOSE_REASON_DEFAULT = 'Session closed.';
+const NO_ROOM_ROM = '__none__';
 
 interface RemoteInputEvent {
   fromName: string;
@@ -64,6 +67,29 @@ function slotLabel(slot: number): string {
   return `Player ${slot}`;
 }
 
+function connectionClass(status: 'connecting' | 'connected' | 'disconnected'): string {
+  if (status === 'connected') {
+    return 'status-pill status-good';
+  }
+  if (status === 'connecting') {
+    return 'status-pill status-warn';
+  }
+  return 'status-pill status-bad';
+}
+
+function latencyClass(latencyMs: number | undefined, connected: boolean): string {
+  if (!connected || latencyMs === undefined) {
+    return 'status-pill';
+  }
+  if (latencyMs <= 90) {
+    return 'status-pill status-good';
+  }
+  if (latencyMs <= 170) {
+    return 'status-pill status-warn';
+  }
+  return 'status-pill status-bad';
+}
+
 function normalizeSessionSnapshot(session: MultiplayerSessionSnapshot): MultiplayerSessionSnapshot {
   return {
     ...session,
@@ -88,6 +114,9 @@ export function OnlineSessionPage() {
   const { code } = useParams<{ code: string }>();
   const [searchParams] = useSearchParams();
   const clientId = searchParams.get('clientId') ?? '';
+  const roms = useAppStore((state) => state.roms);
+  const loadingRoms = useAppStore((state) => state.loadingRoms);
+  const refreshRoms = useAppStore((state) => state.refreshRoms);
 
   const socketRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<number | null>(null);
@@ -106,6 +135,8 @@ export function OnlineSessionPage() {
   const [latencyMs, setLatencyMs] = useState<number>();
   const [sessionClosedReason, setSessionClosedReason] = useState<string>();
   const [endingSession, setEndingSession] = useState(false);
+  const [hostRomSelectionId, setHostRomSelectionId] = useState(NO_ROOM_ROM);
+  const [savingHostRomSelection, setSavingHostRomSelection] = useState(false);
 
   const normalizedCode = (code ?? '').toUpperCase();
   const sessionContext =
@@ -140,6 +171,19 @@ export function OnlineSessionPage() {
       ? ''
       : buildInviteJoinUrl(normalizedCode, window.location.origin);
   const canSendRealtimeInput = socketStatus === 'connected' && !sessionClosedReason;
+  const selectedHostRom: RomRecord | undefined =
+    hostRomSelectionId === NO_ROOM_ROM ? undefined : roms.find((rom) => rom.id === hostRomSelectionId);
+
+  useEffect(() => {
+    if (!isHost) {
+      return;
+    }
+    void refreshRoms();
+  }, [isHost, refreshRoms]);
+
+  useEffect(() => {
+    setHostRomSelectionId(session?.romId ?? NO_ROOM_ROM);
+  }, [session?.romId]);
 
   useEffect(() => {
     if (!normalizedCode) {
@@ -512,6 +556,41 @@ export function OnlineSessionPage() {
     setChatDraft('');
   };
 
+  const onSetRoomRom = (): void => {
+    if (!isHost) {
+      return;
+    }
+
+    const socket = socketRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      setError('Connect to the room before setting ROM selection.');
+      return;
+    }
+
+    const nextRom = selectedHostRom;
+    setSavingHostRomSelection(true);
+    socket.send(
+      JSON.stringify({
+        type: 'host_rom',
+        romId: nextRom?.id ?? null,
+        romTitle: nextRom?.title ?? null,
+      }),
+    );
+
+    setSession((current) => {
+      if (!current) {
+        return current;
+      }
+      return {
+        ...current,
+        romId: nextRom?.id,
+        romTitle: nextRom?.title,
+      };
+    });
+    setSavingHostRomSelection(false);
+    setClipboardFeedback(nextRom ? `Room ROM set to "${nextRom.title}".` : 'Room ROM cleared.');
+  };
+
   const onEndSession = async (): Promise<void> => {
     if (!isHost || !normalizedCode || !clientId) {
       return;
@@ -556,12 +635,13 @@ export function OnlineSessionPage() {
     <section className="online-session-page">
       <header className="panel">
         <h1>Online Session {normalizedCode}</h1>
-        <p>
-          Connection: <strong>{socketStatus}</strong> • Connected players: <strong>{connectedPlayers}/4</strong>
-        </p>
-        <p>
-          Latency: <strong>{latencyMs ? `${latencyMs} ms` : socketStatus === 'connected' ? 'Measuring…' : 'Unavailable'}</strong>
-        </p>
+        <div className="session-status-row">
+          <span className={connectionClass(socketStatus)}>Connection: {socketStatus}</span>
+          <span className={latencyClass(latencyMs, socketStatus === 'connected')}>
+            Latency: {latencyMs ? `${latencyMs} ms` : socketStatus === 'connected' ? 'Measuring…' : 'Unavailable'}
+          </span>
+          <span className="status-pill">Players: {connectedPlayers}/4</span>
+        </div>
         {currentMember ? (
           <p>
             You are <strong>{slotLabel(currentMember.slot)}</strong>
@@ -613,6 +693,37 @@ export function OnlineSessionPage() {
         <section className="panel">
           <h2>Host Controls</h2>
           <p>Share code <strong>{normalizedCode}</strong> or your invite link to have friends join instantly.</p>
+          <h3>Room ROM</h3>
+          {roms.length > 0 ? (
+            <div className="room-rom-controls">
+              <label>
+                Selected ROM
+                <select
+                  value={hostRomSelectionId}
+                  onChange={(event) => setHostRomSelectionId(event.target.value)}
+                  disabled={loadingRoms || !canSendRealtimeInput}
+                >
+                  <option value={NO_ROOM_ROM}>None (clear current room ROM)</option>
+                  {roms.map((rom) => (
+                    <option key={rom.id} value={rom.id}>
+                      {rom.title}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <button
+                type="button"
+                onClick={onSetRoomRom}
+                disabled={!canSendRealtimeInput || savingHostRomSelection}
+              >
+                {savingHostRomSelection ? 'Saving…' : 'Set Room ROM'}
+              </button>
+            </div>
+          ) : (
+            <p className="online-subtle">
+              No ROMs in your library yet. <Link to={libraryRoute}>Import or index ROMs first</Link>.
+            </p>
+          )}
           {session?.romId ? (
             <p>
               <Link to={buildSessionPlayUrl(session.romId, sessionContext)}>
@@ -709,6 +820,9 @@ export function OnlineSessionPage() {
             Send
           </button>
         </form>
+        <p className="online-subtle">
+          {chatDraft.trim().length}/{CHAT_MAX_LENGTH} characters
+        </p>
       </section>
     </section>
   );
