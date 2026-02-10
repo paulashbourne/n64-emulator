@@ -24,6 +24,8 @@ import type { N64ControlTarget } from '../types/input';
 
 const REMOTE_LOG_LIMIT = 40;
 const SOCKET_RECONNECT_DELAY_MS = 1_500;
+const SOCKET_HEARTBEAT_INTERVAL_MS = 10_000;
+const CHAT_MAX_LENGTH = 280;
 
 interface RemoteInputEvent {
   fromName: string;
@@ -61,6 +63,13 @@ function slotLabel(slot: number): string {
   return `Player ${slot}`;
 }
 
+function normalizeSessionSnapshot(session: MultiplayerSessionSnapshot): MultiplayerSessionSnapshot {
+  return {
+    ...session,
+    chat: Array.isArray((session as { chat?: unknown }).chat) ? session.chat : [],
+  };
+}
+
 function sendInputPayload(socket: WebSocket | null, payload: MultiplayerInputPayload): void {
   if (!socket || socket.readyState !== WebSocket.OPEN) {
     return;
@@ -89,6 +98,7 @@ export function OnlineSessionPage() {
   const [clipboardMessage, setClipboardMessage] = useState<string>();
   const [remoteInputs, setRemoteInputs] = useState<RemoteInputEvent[]>([]);
   const [gamepadConnected, setGamepadConnected] = useState(false);
+  const [chatDraft, setChatDraft] = useState('');
 
   const normalizedCode = (code ?? '').toUpperCase();
   const sessionContext =
@@ -133,7 +143,7 @@ export function OnlineSessionPage() {
       try {
         const snapshot = await getOnlineSession(normalizedCode);
         if (!cancelled) {
-          setSession(snapshot.session);
+          setSession(normalizeSessionSnapshot(snapshot.session));
         }
       } catch (loadError) {
         if (!cancelled) {
@@ -187,6 +197,14 @@ export function OnlineSessionPage() {
       setSocketStatus('connecting');
       const socket = new WebSocket(multiplayerSocketUrl(normalizedCode, clientId));
       socketRef.current = socket;
+      let heartbeatTimer: number | undefined;
+
+      const clearHeartbeatTimer = (): void => {
+        if (heartbeatTimer !== undefined) {
+          window.clearInterval(heartbeatTimer);
+          heartbeatTimer = undefined;
+        }
+      };
 
       socket.onopen = () => {
         if (cancelled) {
@@ -195,6 +213,12 @@ export function OnlineSessionPage() {
 
         setSocketStatus('connected');
         setError(undefined);
+
+        heartbeatTimer = window.setInterval(() => {
+          if (socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ type: 'ping' }));
+          }
+        }, SOCKET_HEARTBEAT_INTERVAL_MS);
       };
 
       socket.onmessage = (event) => {
@@ -204,7 +228,7 @@ export function OnlineSessionPage() {
         }
 
         if (message.type === 'room_state') {
-          setSession(message.session);
+          setSession(normalizeSessionSnapshot(message.session));
           return;
         }
 
@@ -219,6 +243,22 @@ export function OnlineSessionPage() {
             },
             ...current,
           ].slice(0, REMOTE_LOG_LIMIT));
+          return;
+        }
+
+        if (message.type === 'chat') {
+          setSession((current) => {
+            if (!current) {
+              return current;
+            }
+            if (current.chat.some((entry) => entry.id === message.entry.id)) {
+              return current;
+            }
+            return {
+              ...current,
+              chat: [...current.chat, message.entry].slice(-60),
+            };
+          });
         }
       };
 
@@ -226,6 +266,7 @@ export function OnlineSessionPage() {
         if (cancelled) {
           return;
         }
+        clearHeartbeatTimer();
         setSocketStatus('disconnected');
         scheduleReconnect();
       };
@@ -234,6 +275,7 @@ export function OnlineSessionPage() {
         if (cancelled) {
           return;
         }
+        clearHeartbeatTimer();
         socket.close();
       };
     };
@@ -400,6 +442,27 @@ export function OnlineSessionPage() {
     }
   };
 
+  const onSendChat = (): void => {
+    const message = chatDraft.trim();
+    if (!message) {
+      return;
+    }
+
+    const socket = socketRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      setClipboardFeedback('Connect before sending chat.');
+      return;
+    }
+
+    socket.send(
+      JSON.stringify({
+        type: 'chat',
+        text: message.slice(0, CHAT_MAX_LENGTH),
+      }),
+    );
+    setChatDraft('');
+  };
+
   if (!normalizedCode || !clientId) {
     return (
       <section className="panel">
@@ -518,6 +581,47 @@ export function OnlineSessionPage() {
           </div>
         </section>
       )}
+
+      <section className="panel">
+        <h2>Session Chat</h2>
+        {session?.chat.length ? (
+          <ul className="chat-list">
+            {session.chat.map((entry) => (
+              <li key={entry.id}>
+                <p>
+                  <strong>{entry.fromName}</strong> ({slotLabel(entry.fromSlot)}) •{' '}
+                  {new Date(entry.at).toLocaleTimeString()}
+                </p>
+                <p>{entry.message}</p>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p>No chat messages yet.</p>
+        )}
+        <form
+          className="chat-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            onSendChat();
+          }}
+        >
+          <label>
+            Message
+            <input
+              type="text"
+              value={chatDraft}
+              onChange={(event) => setChatDraft(event.target.value)}
+              maxLength={CHAT_MAX_LENGTH}
+              placeholder="Type a message for everyone in this room…"
+              disabled={socketStatus !== 'connected'}
+            />
+          </label>
+          <button type="submit" disabled={socketStatus !== 'connected' || chatDraft.trim().length === 0}>
+            Send
+          </button>
+        </form>
+      </section>
     </section>
   );
 }

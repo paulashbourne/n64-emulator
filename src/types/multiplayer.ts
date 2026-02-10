@@ -16,6 +16,7 @@ export interface MultiplayerSessionSnapshot {
   romId?: string;
   romTitle?: string;
   members: MultiplayerMember[];
+  chat: MultiplayerChatEntry[];
 }
 
 export interface CreateSessionResponse {
@@ -42,6 +43,15 @@ export interface MultiplayerDigitalInputPayload {
 
 export type MultiplayerInputPayload = MultiplayerDigitalInputPayload;
 
+export interface MultiplayerChatEntry {
+  id: string;
+  fromClientId: string;
+  fromName: string;
+  fromSlot: number;
+  message: string;
+  at: number;
+}
+
 export type MultiplayerSocketMessage =
   | {
       type: 'connected';
@@ -60,6 +70,10 @@ export type MultiplayerSocketMessage =
       fromSlot: number;
       payload: MultiplayerInputPayload | null;
       at: number;
+    }
+  | {
+      type: 'chat';
+      entry: MultiplayerChatEntry;
     }
   | {
       type: 'pong';

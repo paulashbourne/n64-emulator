@@ -20,6 +20,8 @@ A browser-based N64 emulator app scaffold with:
 - Session-aware host flow: choose ROM later in Library while preserving active online session context
 - Invite UX upgrades: copy invite code or full join link, plus deep-link join prefill (`/online?code=...`)
 - Joiner input upgrades: keyboard hold/release capture + gamepad button capture with transition-based relay
+- In-room chat with recent message history retained in session snapshots
+- WebSocket heartbeat (`ping`/`pong`) from host and joiners for better long-session stability
 
 ## Current core status
 
@@ -79,6 +81,7 @@ npm run test:e2e -- e2e/library-favorites.smoke.spec.ts
 npm run test:e2e -- e2e/library-sort-preference.smoke.spec.ts
 npm run test:e2e -- e2e/duplicate-import.smoke.spec.ts
 npm run test:e2e -- e2e/online-session.smoke.spec.ts
+npm run test:e2e -- e2e/online-chat.smoke.spec.ts
 ```
 
 ## Online multiplayer architecture (MVP)
@@ -89,6 +92,7 @@ npm run test:e2e -- e2e/online-session.smoke.spec.ts
 - Coordinator tracks room membership and relays remote controller input messages to host.
 - Host Play page consumes relayed remote inputs using EmulatorJS `simulateInput` and maps slots to controller ports.
 - Joiners can send controller events from on-screen quick inputs, keyboard press/release mapping, or supported gamepad buttons.
+- Any connected player can send room chat messages to all other members.
 
 ## Browser support
 
@@ -119,6 +123,7 @@ Included tests cover:
 - Duplicate ROM import dedupe handling
 - Keyboard preset mapping flow in the controller wizard
 - End-to-end online host/join invite-code flow with two browser clients
+- End-to-end online room chat between host and joiner
 - End-to-end host choose-later flow that carries session params from Online room to Library and Play
 - Save keying by ROM hash
 - Catalog import/index flows

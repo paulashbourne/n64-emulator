@@ -26,6 +26,7 @@ import type { MultiplayerSocketMessage } from '../types/multiplayer';
 import type { RomRecord } from '../types/rom';
 
 const PLAYER_SELECTOR = '#emulatorjs-player';
+const ONLINE_HEARTBEAT_INTERVAL_MS = 10_000;
 
 type SessionStatus = 'loading' | 'running' | 'paused' | 'error';
 
@@ -294,6 +295,14 @@ export function PlayPage() {
 
       const socket = new WebSocket(multiplayerSocketUrl(onlineCode, onlineClientId));
       onlineSocketRef.current = socket;
+      let heartbeatTimer: number | undefined;
+
+      const clearHeartbeatTimer = (): void => {
+        if (heartbeatTimer !== undefined) {
+          window.clearInterval(heartbeatTimer);
+          heartbeatTimer = undefined;
+        }
+      };
 
       socket.onopen = () => {
         if (cancelled) {
@@ -309,6 +318,12 @@ export function PlayPage() {
             romTitle: activeRomTitle,
           }),
         );
+
+        heartbeatTimer = window.setInterval(() => {
+          if (socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ type: 'ping' }));
+          }
+        }, ONLINE_HEARTBEAT_INTERVAL_MS);
       };
 
       socket.onmessage = (event) => {
@@ -350,6 +365,7 @@ export function PlayPage() {
         if (cancelled) {
           return;
         }
+        clearHeartbeatTimer();
 
         setOnlineRelayStatus('connecting');
         scheduleReconnect();
@@ -359,7 +375,7 @@ export function PlayPage() {
         if (cancelled) {
           return;
         }
-
+        clearHeartbeatTimer();
         socket.close();
       };
     };

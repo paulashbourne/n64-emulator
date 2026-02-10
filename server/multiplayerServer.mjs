@@ -8,6 +8,7 @@ const PORT = Number(process.env.MULTIPLAYER_PORT ?? 8787);
 const MAX_PLAYERS = 4;
 const HOST_RECONNECT_GRACE_MS = 120_000;
 const MEMBER_RECONNECT_GRACE_MS = 20_000;
+const MAX_CHAT_MESSAGES = 60;
 const INVITE_CODE_LENGTH = 6;
 const INVITE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
@@ -31,6 +32,14 @@ const INVITE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
  *   hostClientId: string;
  *   romId?: string;
  *   romTitle?: string;
+ *   chat: Array<{
+ *     id: string;
+ *     fromClientId: string;
+ *     fromName: string;
+ *     fromSlot: number;
+ *     message: string;
+ *     at: number;
+ *   }>;
  *   hostCloseTimer?: NodeJS.Timeout;
  *   members: Map<string, SessionMember>;
  * }} SessionRecord
@@ -72,6 +81,14 @@ function sanitizeName(value, fallback) {
   return clean.length > 0 ? clean : fallback;
 }
 
+function sanitizeChatMessage(value) {
+  if (typeof value !== 'string') {
+    return '';
+  }
+
+  return value.replace(/\s+/g, ' ').trim().slice(0, 280);
+}
+
 function generateInviteCode() {
   let code = '';
   for (let index = 0; index < INVITE_CODE_LENGTH; index += 1) {
@@ -108,8 +125,18 @@ function publicSession(session) {
     hostClientId: session.hostClientId,
     romId: session.romId,
     romTitle: session.romTitle,
+    chat: session.chat,
     members: [...session.members.values()].map(publicMember).sort((left, right) => left.slot - right.slot),
   };
+}
+
+function broadcastToConnectedMembers(session, payload) {
+  for (const member of session.members.values()) {
+    if (!member.socket || member.socket.readyState !== member.socket.OPEN) {
+      continue;
+    }
+    member.socket.send(payload);
+  }
 }
 
 function broadcastRoomState(session) {
@@ -117,13 +144,15 @@ function broadcastRoomState(session) {
     type: 'room_state',
     session: publicSession(session),
   });
+  broadcastToConnectedMembers(session, payload);
+}
 
-  for (const member of session.members.values()) {
-    if (!member.socket || member.socket.readyState !== member.socket.OPEN) {
-      continue;
-    }
-    member.socket.send(payload);
-  }
+function broadcastChatEntry(session, entry) {
+  const payload = JSON.stringify({
+    type: 'chat',
+    entry,
+  });
+  broadcastToConnectedMembers(session, payload);
 }
 
 function findOpenPlayerSlot(session) {
@@ -185,6 +214,30 @@ function handleWsMessage(session, member, rawMessage) {
         at: Date.now(),
       }),
     );
+    return;
+  }
+
+  if (message.type === 'chat') {
+    const text = sanitizeChatMessage(message.text);
+    if (!text) {
+      return;
+    }
+
+    const entry = {
+      id: randomUUID(),
+      fromClientId: member.clientId,
+      fromName: member.name,
+      fromSlot: member.slot,
+      message: text,
+      at: Date.now(),
+    };
+
+    session.chat.push(entry);
+    if (session.chat.length > MAX_CHAT_MESSAGES) {
+      session.chat.splice(0, session.chat.length - MAX_CHAT_MESSAGES);
+    }
+
+    broadcastChatEntry(session, entry);
   }
 }
 
@@ -283,6 +336,7 @@ const httpServer = createServer(async (req, res) => {
         hostClientId,
         romId: typeof body.romId === 'string' ? body.romId : undefined,
         romTitle: typeof body.romTitle === 'string' ? body.romTitle : undefined,
+        chat: [],
         members: new Map(),
       };
 

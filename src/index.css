@@ -470,6 +470,43 @@ label {
   margin: 0.3rem 0;
 }
 
+.chat-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.55rem;
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.chat-list li {
+  padding: 0.62rem 0.72rem;
+  border-radius: 0.68rem;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.chat-list p {
+  margin: 0;
+}
+
+.chat-list li p + p {
+  margin-top: 0.35rem;
+}
+
+.chat-form {
+  margin-top: 0.75rem;
+  display: grid;
+  gap: 0.6rem;
+  grid-template-columns: 1fr auto;
+  align-items: end;
+}
+
+.chat-form label {
+  margin: 0;
+}
+
 .room-player-list,
 .remote-input-list {
   list-style: none;
@@ -530,5 +567,9 @@ label {
   .profile-list li {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .chat-form {
+    grid-template-columns: 1fr;
   }
 }
