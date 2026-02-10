@@ -243,6 +243,17 @@ label {
   color: var(--ink-muted);
 }
 
+.session-banner {
+  border-color: rgba(46, 196, 182, 0.55);
+  background:
+    linear-gradient(120deg, rgba(46, 196, 182, 0.2), rgba(255, 159, 28, 0.1)),
+    var(--surface);
+}
+
+.session-banner h2 {
+  margin-top: 0;
+}
+
 .warning-text {
   color: var(--warning);
 }
@@ -436,10 +447,27 @@ label {
   background: rgba(255, 93, 115, 0.22);
 }
 
+.online-page-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+.online-card {
+  min-height: 280px;
+  display: grid;
+  align-content: start;
+}
+
 .online-form-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 0.8rem;
+}
+
+.online-subtle {
+  color: var(--ink-muted);
+  margin: 0.3rem 0;
 }
 
 .room-player-list,
@@ -459,6 +487,15 @@ label {
   background: rgba(255, 255, 255, 0.05);
 }
 
+.remote-input-down {
+  border-color: rgba(46, 196, 182, 0.6);
+  background: rgba(46, 196, 182, 0.12);
+}
+
+.remote-input-up {
+  border-color: rgba(255, 159, 28, 0.45);
+}
+
 .online-input-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
@@ -472,6 +509,10 @@ label {
 
   .ejs-player-host {
     min-height: 360px;
+  }
+
+  .online-page-grid {
+    grid-template-columns: 1fr;
   }
 }
 

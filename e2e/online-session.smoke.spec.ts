@@ -25,7 +25,7 @@ test('host can create an invite code and a second player can join', async ({ pag
 
   await guestPage.getByRole('button', { name: 'A', exact: true }).click();
   await expect(page.getByText('Player 2 (GuestTwo)')).toBeVisible({ timeout: 15_000 });
-  await expect(page.getByText('"control":"a"')).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByText('a down')).toBeVisible({ timeout: 15_000 });
 
   await guestContext.close();
 });

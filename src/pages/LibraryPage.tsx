@@ -1,12 +1,25 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ChangeEvent } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 
+import { buildSessionPlayUrl, buildSessionRoute } from '../online/sessionLinks';
 import { useAppStore } from '../state/appStore';
 
 export function LibraryPage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [searchParams] = useSearchParams();
   const [infoMessage, setInfoMessage] = useState<string>();
+
+  const onlineCode = (searchParams.get('onlineCode') ?? '').trim().toUpperCase();
+  const onlineClientId = (searchParams.get('onlineClientId') ?? '').trim();
+  const onlineSessionContext =
+    onlineCode && onlineClientId
+      ? {
+          onlineCode,
+          onlineClientId,
+        }
+      : undefined;
+  const sessionRoute = buildSessionRoute(onlineSessionContext);
 
   const roms = useAppStore((state) => state.roms);
   const searchTerm = useAppStore((state) => state.searchTerm);
@@ -95,6 +108,15 @@ export function LibraryPage() {
     setInfoMessage(`Removed "${title}" from the catalog.`);
   };
 
+  const onCopyRomHash = async (title: string, hash: string): Promise<void> => {
+    try {
+      await navigator.clipboard.writeText(hash);
+      setInfoMessage(`Copied ROM hash for "${title}".`);
+    } catch {
+      setInfoMessage(`Could not copy ROM hash for "${title}".`);
+    }
+  };
+
   return (
     <section className="library-page">
       <header className="panel">
@@ -126,7 +148,7 @@ export function LibraryPage() {
 
         <div className="toolbar">
           {lastPlayedRom ? (
-            <Link to={`/play/${encodeURIComponent(lastPlayedRom.id)}`} className="resume-link">
+            <Link to={buildSessionPlayUrl(lastPlayedRom.id, onlineSessionContext)} className="resume-link">
               Resume Last Played: {lastPlayedRom.title}
             </Link>
           ) : null}
@@ -192,6 +214,18 @@ export function LibraryPage() {
         {infoMessage ? <p>{infoMessage}</p> : null}
       </header>
 
+      {onlineSessionContext ? (
+        <section className="panel session-banner">
+          <h2>Online Host Session Active</h2>
+          <p>
+            Launching a ROM from this page will keep you connected to session <strong>{onlineCode}</strong>.
+          </p>
+          <div className="wizard-actions">
+            {sessionRoute ? <Link to={sessionRoute}>Return to Session Room</Link> : null}
+          </div>
+        </section>
+      ) : null}
+
       <section className="panel">
         <h2>Catalog ({roms.length})</h2>
         {loadingRoms ? <p>Loading ROMs…</p> : null}
@@ -222,7 +256,10 @@ export function LibraryPage() {
                   >
                     {rom.favorite ? 'Unfavorite' : 'Favorite'}
                   </button>
-                  <Link to={`/play/${encodeURIComponent(rom.id)}`}>Play</Link>
+                  <button type="button" onClick={() => void onCopyRomHash(rom.title, rom.hash)} disabled={loadingRoms}>
+                    Copy Hash
+                  </button>
+                  <Link to={buildSessionPlayUrl(rom.id, onlineSessionContext)}>Play</Link>
                   <button type="button" onClick={() => void onRemoveRom(rom.id, rom.title)} disabled={loadingRoms}>
                     Remove
                   </button>

@@ -16,6 +16,7 @@ import {
   describeRemoteInputPayload,
   parseRemoteInputPayload,
 } from '../online/remoteInputBridge';
+import { buildInviteJoinUrl, buildSessionLibraryUrl, buildSessionRoute } from '../online/sessionLinks';
 import { getRomArrayBuffer, getRomById } from '../roms/catalogService';
 import { normalizeRomByteOrder } from '../roms/scanner';
 import { getPreferredBootMode, setPreferredBootMode } from '../storage/appSettings';
@@ -63,6 +64,14 @@ export function PlayPage() {
   const onlineCode = (searchParams.get('onlineCode') ?? '').trim().toUpperCase();
   const onlineClientId = (searchParams.get('onlineClientId') ?? '').trim();
   const onlineRelayEnabled = onlineCode.length > 0 && onlineClientId.length > 0;
+  const onlineSessionContext = onlineRelayEnabled
+    ? {
+        onlineCode,
+        onlineClientId,
+      }
+    : undefined;
+  const sessionRoute = buildSessionRoute(onlineSessionContext);
+  const libraryRoute = buildSessionLibraryUrl(onlineSessionContext);
 
   const romBlobUrlRef = useRef<string | null>(null);
   const lastAppliedProfileRef = useRef<string | null>(null);
@@ -88,6 +97,7 @@ export function PlayPage() {
   );
   const [onlineRemoteEventsApplied, setOnlineRemoteEventsApplied] = useState(0);
   const [onlineLastRemoteInput, setOnlineLastRemoteInput] = useState<string>();
+  const [onlineConnectedMembers, setOnlineConnectedMembers] = useState(1);
 
   const activeProfile = useMemo<ControllerProfile | undefined>(
     () => profiles.find((profile) => profile.profileId === activeProfileId),
@@ -251,6 +261,7 @@ export function PlayPage() {
       setOnlineRelayStatus('offline');
       setOnlineRemoteEventsApplied(0);
       setOnlineLastRemoteInput(undefined);
+      setOnlineConnectedMembers(1);
       return;
     }
 
@@ -306,7 +317,17 @@ export function PlayPage() {
         }
 
         const message = tryParseSocketMessage(event.data);
-        if (!message || message.type !== 'remote_input') {
+        if (!message) {
+          return;
+        }
+
+        if (message.type === 'room_state') {
+          const connectedMembers = message.session.members.filter((member) => member.connected).length;
+          setOnlineConnectedMembers(Math.max(connectedMembers, 1));
+          return;
+        }
+
+        if (message.type !== 'remote_input') {
           return;
         }
 
@@ -408,6 +429,20 @@ export function PlayPage() {
     }
   };
 
+  const onCopyInviteLink = async (): Promise<void> => {
+    if (!onlineRelayEnabled) {
+      return;
+    }
+
+    try {
+      const inviteUrl = buildInviteJoinUrl(onlineCode, window.location.origin);
+      await navigator.clipboard.writeText(inviteUrl);
+      setEmulatorWarning('Invite link copied to clipboard.');
+    } catch {
+      setEmulatorWarning('Unable to copy invite link automatically. Copy the invite code manually.');
+    }
+  };
+
   useEffect(() => {
     const togglePause = (): void => {
       const emulator = window.EJS_emulator;
@@ -498,7 +533,7 @@ export function PlayPage() {
           <p>Boot mode: {bootMode === 'auto' ? 'Auto fallback' : bootMode === 'local' ? 'Local cores only' : 'CDN cores only'}</p>
           {onlineRelayEnabled ? (
             <p>
-              Online relay: {onlineRelayStatus} • Code: {onlineCode} • Remote inputs applied: {onlineRemoteEventsApplied}
+              Online relay: {onlineRelayStatus} • Code: {onlineCode} • Players connected: {onlineConnectedMembers}/4 • Remote inputs applied: {onlineRemoteEventsApplied}
             </p>
           ) : null}
           {onlineRelayEnabled && onlineLastRemoteInput ? <p>Last remote input: {onlineLastRemoteInput}</p> : null}
@@ -514,11 +549,12 @@ export function PlayPage() {
           <button type="button" onClick={() => setWizardOpen(true)}>
             Map Controller
           </button>
-          <button type="button" onClick={() => navigate('/')}>Back to Library</button>
+          <button type="button" onClick={() => navigate(libraryRoute)}>Back to Library</button>
+          {onlineRelayEnabled && sessionRoute ? <Link to={sessionRoute}>Back to Session</Link> : null}
           {onlineRelayEnabled ? (
-            <Link to={`/online/session/${onlineCode}?clientId=${encodeURIComponent(onlineClientId)}`}>
-              Back to Session
-            </Link>
+            <button type="button" onClick={() => void onCopyInviteLink()}>
+              Copy Invite Link
+            </button>
           ) : null}
         </div>
         <p>First launch can take a few seconds while core files initialize.</p>

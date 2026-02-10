@@ -17,6 +17,9 @@ A browser-based N64 emulator app scaffold with:
 - One-click controller keyboard preset in the mapping wizard
 - Keyboard shortcuts on play screen: `Space` pause/resume, `R` reset, `M` open mapper, `Esc` close mapper
 - Online session MVP: host/join via invite code with up to 4 player slots and live remote input relay into player 2-4
+- Session-aware host flow: choose ROM later in Library while preserving active online session context
+- Invite UX upgrades: copy invite code or full join link, plus deep-link join prefill (`/online?code=...`)
+- Joiner input upgrades: keyboard hold/release capture + gamepad button capture with transition-based relay
 
 ## Current core status
 
@@ -85,7 +88,7 @@ npm run test:e2e -- e2e/online-session.smoke.spec.ts
 - Joiners claim the first open slot (`Player 2` through `Player 4`).
 - Coordinator tracks room membership and relays remote controller input messages to host.
 - Host Play page consumes relayed remote inputs using EmulatorJS `simulateInput` and maps slots to controller ports.
-- Joiners can send controller events from on-screen quick inputs or keyboard press/release mapping.
+- Joiners can send controller events from on-screen quick inputs, keyboard press/release mapping, or supported gamepad buttons.
 
 ## Browser support
 
@@ -116,5 +119,6 @@ Included tests cover:
 - Duplicate ROM import dedupe handling
 - Keyboard preset mapping flow in the controller wizard
 - End-to-end online host/join invite-code flow with two browser clients
+- End-to-end host choose-later flow that carries session params from Online room to Library and Play
 - Save keying by ROM hash
 - Catalog import/index flows
