@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { MutableRefObject } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 
 import { ControllerWizard } from '../components/ControllerWizard';
 import { applyProfileToRunningEmulator, controllerProfileToEmulatorJsControls } from '../emulator/emulatorJsControls';
@@ -10,11 +10,18 @@ import {
   stopEmulatorJs,
   type EmulatorBootMode,
 } from '../emulator/emulatorJsRuntime';
+import { multiplayerSocketUrl } from '../online/multiplayerApi';
+import {
+  applyRemoteInputPayloadToHost,
+  describeRemoteInputPayload,
+  parseRemoteInputPayload,
+} from '../online/remoteInputBridge';
 import { getRomArrayBuffer, getRomById } from '../roms/catalogService';
 import { normalizeRomByteOrder } from '../roms/scanner';
 import { getPreferredBootMode, setPreferredBootMode } from '../storage/appSettings';
 import { useAppStore } from '../state/appStore';
 import type { ControllerProfile } from '../types/input';
+import type { MultiplayerSocketMessage } from '../types/multiplayer';
 import type { RomRecord } from '../types/rom';
 
 const PLAYER_SELECTOR = '#emulatorjs-player';
@@ -30,9 +37,18 @@ function revokeRomBlobUrl(ref: MutableRefObject<string | null>): void {
   ref.current = null;
 }
 
+function tryParseSocketMessage(raw: string): MultiplayerSocketMessage | null {
+  try {
+    return JSON.parse(raw) as MultiplayerSocketMessage;
+  } catch {
+    return null;
+  }
+}
+
 export function PlayPage() {
   const { romId } = useParams<{ romId: string }>();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
 
   const markLastPlayed = useAppStore((state) => state.markLastPlayed);
   const loadProfiles = useAppStore((state) => state.loadProfiles);
@@ -44,9 +60,18 @@ export function PlayPage() {
   const setEmulatorWarning = useAppStore((state) => state.setEmulatorWarning);
 
   const decodedRomId = romId ? decodeURIComponent(romId) : undefined;
+  const onlineCode = (searchParams.get('onlineCode') ?? '').trim().toUpperCase();
+  const onlineClientId = (searchParams.get('onlineClientId') ?? '').trim();
+  const onlineRelayEnabled = onlineCode.length > 0 && onlineClientId.length > 0;
 
   const romBlobUrlRef = useRef<string | null>(null);
   const lastAppliedProfileRef = useRef<string | null>(null);
+  const onlineSocketRef = useRef<WebSocket | null>(null);
+  const onlineReconnectTimerRef = useRef<number | null>(null);
+  const onlineRomDescriptorRef = useRef<{ romId?: string; romTitle?: string }>({
+    romId: decodedRomId,
+    romTitle: undefined,
+  });
 
   const [rom, setRom] = useState<RomRecord>();
   const [status, setStatus] = useState<SessionStatus>('loading');
@@ -58,6 +83,11 @@ export function PlayPage() {
   const [bootModeLoaded, setBootModeLoaded] = useState(false);
   const [bootNonce, setBootNonce] = useState(0);
   const [clearingCache, setClearingCache] = useState(false);
+  const [onlineRelayStatus, setOnlineRelayStatus] = useState<'offline' | 'connecting' | 'connected'>(
+    onlineRelayEnabled ? 'connecting' : 'offline',
+  );
+  const [onlineRemoteEventsApplied, setOnlineRemoteEventsApplied] = useState(0);
+  const [onlineLastRemoteInput, setOnlineLastRemoteInput] = useState<string>();
 
   const activeProfile = useMemo<ControllerProfile | undefined>(
     () => profiles.find((profile) => profile.profileId === activeProfileId),
@@ -191,6 +221,140 @@ export function PlayPage() {
       setEmulatorWarning(`Applied controller profile: ${activeProfile.name}`);
     }
   }, [activeProfile, setEmulatorWarning, status]);
+
+  useEffect(() => {
+    onlineRomDescriptorRef.current = {
+      romId: decodedRomId,
+      romTitle: rom?.title,
+    };
+
+    if (!onlineRelayEnabled) {
+      return;
+    }
+
+    const socket = onlineSocketRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    socket.send(
+      JSON.stringify({
+        type: 'host_rom',
+        romId: decodedRomId,
+        romTitle: rom?.title,
+      }),
+    );
+  }, [decodedRomId, onlineRelayEnabled, rom?.title]);
+
+  useEffect(() => {
+    if (!onlineRelayEnabled) {
+      setOnlineRelayStatus('offline');
+      setOnlineRemoteEventsApplied(0);
+      setOnlineLastRemoteInput(undefined);
+      return;
+    }
+
+    let cancelled = false;
+
+    const clearReconnectTimer = (): void => {
+      if (onlineReconnectTimerRef.current !== null) {
+        window.clearTimeout(onlineReconnectTimerRef.current);
+        onlineReconnectTimerRef.current = null;
+      }
+    };
+
+    const scheduleReconnect = (): void => {
+      if (cancelled || onlineReconnectTimerRef.current !== null) {
+        return;
+      }
+
+      onlineReconnectTimerRef.current = window.setTimeout(() => {
+        onlineReconnectTimerRef.current = null;
+        connect();
+      }, 1_500);
+    };
+
+    const connect = (): void => {
+      if (cancelled) {
+        return;
+      }
+
+      setOnlineRelayStatus('connecting');
+
+      const socket = new WebSocket(multiplayerSocketUrl(onlineCode, onlineClientId));
+      onlineSocketRef.current = socket;
+
+      socket.onopen = () => {
+        if (cancelled) {
+          return;
+        }
+
+        setOnlineRelayStatus('connected');
+        const { romId: activeRomId, romTitle: activeRomTitle } = onlineRomDescriptorRef.current;
+        socket.send(
+          JSON.stringify({
+            type: 'host_rom',
+            romId: activeRomId,
+            romTitle: activeRomTitle,
+          }),
+        );
+      };
+
+      socket.onmessage = (event) => {
+        if (typeof event.data !== 'string') {
+          return;
+        }
+
+        const message = tryParseSocketMessage(event.data);
+        if (!message || message.type !== 'remote_input') {
+          return;
+        }
+
+        const parsedPayload = parseRemoteInputPayload(message.payload);
+        const applied = applyRemoteInputPayloadToHost({
+          fromSlot: message.fromSlot,
+          payload: parsedPayload,
+        });
+        if (!applied) {
+          return;
+        }
+
+        setOnlineRemoteEventsApplied((current) => current + 1);
+        setOnlineLastRemoteInput(
+          `${message.fromName} (${message.fromSlot}) ${describeRemoteInputPayload(parsedPayload)}`,
+        );
+      };
+
+      socket.onclose = () => {
+        if (cancelled) {
+          return;
+        }
+
+        setOnlineRelayStatus('connecting');
+        scheduleReconnect();
+      };
+
+      socket.onerror = () => {
+        if (cancelled) {
+          return;
+        }
+
+        socket.close();
+      };
+    };
+
+    connect();
+
+    return () => {
+      cancelled = true;
+      clearReconnectTimer();
+      const socket = onlineSocketRef.current;
+      if (socket) {
+        socket.close();
+        onlineSocketRef.current = null;
+      }
+    };
+  }, [onlineClientId, onlineCode, onlineRelayEnabled]);
 
   const onPauseResume = (): void => {
     const emulator = window.EJS_emulator;
@@ -332,6 +496,12 @@ export function PlayPage() {
           </p>
           <p>Core: {coreLabel}</p>
           <p>Boot mode: {bootMode === 'auto' ? 'Auto fallback' : bootMode === 'local' ? 'Local cores only' : 'CDN cores only'}</p>
+          {onlineRelayEnabled ? (
+            <p>
+              Online relay: {onlineRelayStatus} • Code: {onlineCode} • Remote inputs applied: {onlineRemoteEventsApplied}
+            </p>
+          ) : null}
+          {onlineRelayEnabled && onlineLastRemoteInput ? <p>Last remote input: {onlineLastRemoteInput}</p> : null}
           {activeProfile ? <p>Input profile: {activeProfile.name}</p> : <p>No input profile selected.</p>}
         </div>
         <div className="toolbar">
@@ -345,6 +515,11 @@ export function PlayPage() {
             Map Controller
           </button>
           <button type="button" onClick={() => navigate('/')}>Back to Library</button>
+          {onlineRelayEnabled ? (
+            <Link to={`/online/session/${onlineCode}?clientId=${encodeURIComponent(onlineClientId)}`}>
+              Back to Session
+            </Link>
+          ) : null}
         </div>
         <p>First launch can take a few seconds while core files initialize.</p>
         <p>Shortcuts: Space pause/resume • R reset • M map controller • Esc close wizard.</p>

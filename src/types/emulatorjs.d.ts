@@ -1,9 +1,15 @@
 export {};
 
 declare global {
+  interface EmulatorJsGameManagerFunctions {
+    simulateInput?: (player: number, index: number, value: number) => void;
+  }
+
   interface EmulatorJsGameManager {
     restart?: () => void;
     saveSaveFiles?: () => void;
+    simulateInput?: (player: number, index: number, value: number) => void;
+    functions?: EmulatorJsGameManagerFunctions;
   }
 
   interface EmulatorJsInstance {

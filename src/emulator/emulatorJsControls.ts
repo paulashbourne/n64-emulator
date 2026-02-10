@@ -1,27 +1,7 @@
 import type { ControllerProfile, N64ControlTarget } from '../types/input';
+import { N64_TARGET_TO_INPUT_INDEX } from './n64InputMap';
 
 export type EmulatorJsControls = Record<number, Record<number, { value?: number; value2?: string | number }>>;
-
-const TARGET_TO_INPUT_INDEX: Record<N64ControlTarget, number> = {
-  a: 0,
-  b: 1,
-  z: 12,
-  start: 3,
-  l: 10,
-  r: 11,
-  dpad_up: 4,
-  dpad_down: 5,
-  dpad_left: 6,
-  dpad_right: 7,
-  c_up: 23,
-  c_down: 22,
-  c_left: 21,
-  c_right: 20,
-  analog_left: 17,
-  analog_right: 16,
-  analog_up: 19,
-  analog_down: 18,
-};
 
 const KEY_CODE_BY_CODE: Record<string, number> = {
   ArrowUp: 38,
@@ -107,7 +87,7 @@ export function controllerProfileToEmulatorJsControls(profile?: ControllerProfil
 
   const playerControls: Record<number, { value?: number; value2?: string | number }> = {};
 
-  for (const [target, inputIndex] of Object.entries(TARGET_TO_INPUT_INDEX) as Array<[N64ControlTarget, number]>) {
+  for (const [target, inputIndex] of Object.entries(N64_TARGET_TO_INPUT_INDEX) as Array<[N64ControlTarget, number]>) {
     const binding = profile.bindings[target];
     if (!binding) {
       continue;

@@ -16,7 +16,7 @@ A browser-based N64 emulator app scaffold with:
 - Library view preferences persist (sort mode and favorites-only filter)
 - One-click controller keyboard preset in the mapping wizard
 - Keyboard shortcuts on play screen: `Space` pause/resume, `R` reset, `M` open mapper, `Esc` close mapper
-- Online session MVP: host/join via invite code with up to 4 player slots and live remote input relay
+- Online session MVP: host/join via invite code with up to 4 player slots and live remote input relay into player 2-4
 
 ## Current core status
 
@@ -84,8 +84,8 @@ npm run test:e2e -- e2e/online-session.smoke.spec.ts
 - Host creates a session and shares a 6-character invite code.
 - Joiners claim the first open slot (`Player 2` through `Player 4`).
 - Coordinator tracks room membership and relays remote controller input messages to host.
-- Current implementation focuses on robust room lifecycle + invite flow + input relay channel.
-- Next step after this MVP: connect relayed remote inputs directly into the host emulator control state.
+- Host Play page consumes relayed remote inputs using EmulatorJS `simulateInput` and maps slots to controller ports.
+- Joiners can send controller events from on-screen quick inputs or keyboard press/release mapping.
 
 ## Browser support
 

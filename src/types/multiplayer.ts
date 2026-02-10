@@ -1,3 +1,5 @@
+import type { N64ControlTarget } from './input';
+
 export interface MultiplayerMember {
   clientId: string;
   name: string;
@@ -32,6 +34,14 @@ export interface GetSessionResponse {
   session: MultiplayerSessionSnapshot;
 }
 
+export interface MultiplayerDigitalInputPayload {
+  kind: 'digital';
+  control: N64ControlTarget;
+  pressed: boolean;
+}
+
+export type MultiplayerInputPayload = MultiplayerDigitalInputPayload;
+
 export type MultiplayerSocketMessage =
   | {
       type: 'connected';
@@ -48,7 +58,7 @@ export type MultiplayerSocketMessage =
       fromClientId: string;
       fromName: string;
       fromSlot: number;
-      payload: unknown;
+      payload: MultiplayerInputPayload | null;
       at: number;
     }
   | {

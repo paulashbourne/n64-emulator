@@ -1,12 +1,14 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 
 import { getOnlineSession, multiplayerSocketUrl } from '../online/multiplayerApi';
 import type {
   MultiplayerMember,
+  MultiplayerInputPayload,
   MultiplayerSessionSnapshot,
   MultiplayerSocketMessage,
 } from '../types/multiplayer';
+import type { N64ControlTarget } from '../types/input';
 
 const REMOTE_LOG_LIMIT = 30;
 
@@ -14,19 +16,40 @@ interface RemoteInputEvent {
   fromName: string;
   fromSlot: number;
   at: number;
-  payload: unknown;
+  payload: MultiplayerInputPayload | null;
 }
 
-const QUICK_INPUTS: Array<{ label: string; payload: Record<string, unknown> }> = [
-  { label: 'A', payload: { control: 'a', pressed: true } },
-  { label: 'B', payload: { control: 'b', pressed: true } },
-  { label: 'Z', payload: { control: 'z', pressed: true } },
-  { label: 'Start', payload: { control: 'start', pressed: true } },
-  { label: 'D-Up', payload: { control: 'dpad_up', pressed: true } },
-  { label: 'D-Down', payload: { control: 'dpad_down', pressed: true } },
-  { label: 'D-Left', payload: { control: 'dpad_left', pressed: true } },
-  { label: 'D-Right', payload: { control: 'dpad_right', pressed: true } },
+const QUICK_INPUTS: Array<{ label: string; control: N64ControlTarget }> = [
+  { label: 'A', control: 'a' },
+  { label: 'B', control: 'b' },
+  { label: 'Z', control: 'z' },
+  { label: 'Start', control: 'start' },
+  { label: 'D-Up', control: 'dpad_up' },
+  { label: 'D-Down', control: 'dpad_down' },
+  { label: 'D-Left', control: 'dpad_left' },
+  { label: 'D-Right', control: 'dpad_right' },
+  { label: 'C-Up', control: 'c_up' },
+  { label: 'C-Down', control: 'c_down' },
+  { label: 'C-Left', control: 'c_left' },
+  { label: 'C-Right', control: 'c_right' },
 ];
+
+const JOINER_KEY_TO_CONTROL: Record<string, N64ControlTarget> = {
+  KeyX: 'a',
+  KeyC: 'b',
+  KeyZ: 'z',
+  Enter: 'start',
+  KeyQ: 'l',
+  KeyE: 'r',
+  ArrowUp: 'dpad_up',
+  ArrowDown: 'dpad_down',
+  ArrowLeft: 'dpad_left',
+  ArrowRight: 'dpad_right',
+  KeyI: 'c_up',
+  KeyK: 'c_down',
+  KeyJ: 'c_left',
+  KeyL: 'c_right',
+};
 
 function tryParseSocketMessage(raw: string): MultiplayerSocketMessage | null {
   try {
@@ -46,6 +69,7 @@ export function OnlineSessionPage() {
   const clientId = searchParams.get('clientId') ?? '';
 
   const socketRef = useRef<WebSocket | null>(null);
+  const pressedKeyBindingsRef = useRef(new Map<string, N64ControlTarget>());
   const [socketStatus, setSocketStatus] = useState<'connecting' | 'connected' | 'disconnected'>('connecting');
   const [session, setSession] = useState<MultiplayerSessionSnapshot>();
   const [error, setError] = useState<string>();
@@ -148,7 +172,7 @@ export function OnlineSessionPage() {
     };
   }, [normalizedCode, clientId]);
 
-  const sendInputEvent = (payload: Record<string, unknown>): void => {
+  const sendInputEvent = useCallback((payload: MultiplayerInputPayload): void => {
     const socket = socketRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       return;
@@ -159,7 +183,98 @@ export function OnlineSessionPage() {
         payload,
       }),
     );
-  };
+  }, []);
+
+  const sendQuickTap = useCallback((control: N64ControlTarget): void => {
+    sendInputEvent({
+      kind: 'digital',
+      control,
+      pressed: true,
+    });
+
+    window.setTimeout(() => {
+      sendInputEvent({
+        kind: 'digital',
+        control,
+        pressed: false,
+      });
+    }, 80);
+  }, [sendInputEvent]);
+
+  useEffect(() => {
+    if (isHost) {
+      return;
+    }
+
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.repeat) {
+        return;
+      }
+
+      const target = event.target;
+      if (
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        target instanceof HTMLSelectElement
+      ) {
+        return;
+      }
+
+      const control = JOINER_KEY_TO_CONTROL[event.code];
+      if (!control) {
+        return;
+      }
+
+      event.preventDefault();
+      if (pressedKeyBindingsRef.current.has(event.code)) {
+        return;
+      }
+
+      pressedKeyBindingsRef.current.set(event.code, control);
+      sendInputEvent({
+        kind: 'digital',
+        control,
+        pressed: true,
+      });
+    };
+
+    const onKeyUp = (event: KeyboardEvent): void => {
+      const control = pressedKeyBindingsRef.current.get(event.code) ?? JOINER_KEY_TO_CONTROL[event.code];
+      if (!control) {
+        return;
+      }
+
+      event.preventDefault();
+      pressedKeyBindingsRef.current.delete(event.code);
+      sendInputEvent({
+        kind: 'digital',
+        control,
+        pressed: false,
+      });
+    };
+
+    const releaseAllPressedControls = (): void => {
+      for (const [code, control] of pressedKeyBindingsRef.current.entries()) {
+        pressedKeyBindingsRef.current.delete(code);
+        sendInputEvent({
+          kind: 'digital',
+          control,
+          pressed: false,
+        });
+      }
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
+    window.addEventListener('blur', releaseAllPressedControls);
+
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup', onKeyUp);
+      window.removeEventListener('blur', releaseAllPressedControls);
+      releaseAllPressedControls();
+    };
+  }, [isHost, sendInputEvent]);
 
   const onCopyInviteCode = async (): Promise<void> => {
     try {
@@ -226,7 +341,11 @@ export function OnlineSessionPage() {
           <p>Share invite code <strong>{normalizedCode}</strong> with friends.</p>
           {session?.romId ? (
             <p>
-              <Link to={`/play/${encodeURIComponent(session.romId)}`}>Launch Host ROM</Link>
+              <Link
+                to={`/play/${encodeURIComponent(session.romId)}?onlineCode=${encodeURIComponent(normalizedCode)}&onlineClientId=${encodeURIComponent(clientId)}`}
+              >
+                Launch Host ROM
+              </Link>
             </p>
           ) : (
             <p>Select/import a ROM from Library and then launch it from Play.</p>
@@ -245,13 +364,17 @@ export function OnlineSessionPage() {
       ) : (
         <section className="panel">
           <h2>Send Controller Input</h2>
-          <p>Use quick test buttons to verify host receives your input events.</p>
+          <p>Press mapped keyboard buttons or use quick taps to verify host receives input events.</p>
+          <p>
+            Keyboard preset: <code>X</code> A, <code>C</code> B, <code>Z</code> Z, <code>Enter</code> Start, arrows D-Pad,
+            <code> Q/E</code> L/R, <code>I/J/K/L</code> C-buttons.
+          </p>
           <div className="online-input-grid">
             {QUICK_INPUTS.map((entry) => (
               <button
                 key={entry.label}
                 type="button"
-                onClick={() => sendInputEvent(entry.payload)}
+                onClick={() => sendQuickTap(entry.control)}
                 disabled={socketStatus !== 'connected'}
               >
                 {entry.label}
