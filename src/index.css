@@ -563,6 +563,17 @@ label {
   background: rgba(255, 255, 255, 0.05);
 }
 
+.room-player-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.inline-danger-button {
+  padding: 0.35rem 0.6rem;
+}
+
 .remote-input-down {
   border-color: rgba(46, 196, 182, 0.6);
   background: rgba(46, 196, 182, 0.12);
@@ -614,5 +625,10 @@ label {
 
   .room-rom-controls {
     align-items: stretch;
+  }
+
+  .room-player-row {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }

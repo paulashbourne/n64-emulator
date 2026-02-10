@@ -168,7 +168,7 @@ function findOpenPlayerSlot(session) {
 }
 
 function parseSessionCodeFromPath(pathname) {
-  const match = pathname.match(/^\/api\/multiplayer\/sessions\/([A-Z0-9]{6})(?:\/(join|close))?$/);
+  const match = pathname.match(/^\/api\/multiplayer\/sessions\/([A-Z0-9]{6})(?:\/(join|close|kick))?$/);
   return match ? match[1] : null;
 }
 
@@ -259,6 +259,46 @@ function broadcastSessionClosed(session, reason) {
     at: Date.now(),
   });
   broadcastToConnectedMembers(session, payload);
+}
+
+function sendMemberKicked(member, byName, reason) {
+  if (!member.socket || member.socket.readyState !== member.socket.OPEN) {
+    return;
+  }
+
+  member.socket.send(
+    JSON.stringify({
+      type: 'kicked',
+      byName,
+      reason,
+      at: Date.now(),
+    }),
+  );
+}
+
+function removeMember(session, member, options = {}) {
+  const {
+    byName = 'Host',
+    kickedReason,
+    closeSocketReason,
+  } = options;
+
+  if (member.disconnectTimer) {
+    clearTimeout(member.disconnectTimer);
+    member.disconnectTimer = undefined;
+  }
+
+  if (kickedReason) {
+    sendMemberKicked(member, byName, kickedReason);
+  }
+
+  if (member.socket && member.socket.readyState === member.socket.OPEN) {
+    member.socket.close(1000, closeSocketReason || 'Removed from session');
+  }
+
+  member.connected = false;
+  member.socket = undefined;
+  session.members.delete(member.clientId);
 }
 
 function closeSession(session, options = {}) {
@@ -475,6 +515,54 @@ const httpServer = createServer(async (req, res) => {
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Invalid close payload.';
+      sendJson(res, 400, { error: message });
+    }
+    return;
+  }
+
+  if (req.method === 'POST' && pathname.startsWith('/api/multiplayer/sessions/') && pathname.endsWith('/kick')) {
+    const code = parseSessionCodeFromPath(pathname);
+    if (!code) {
+      sendJson(res, 404, { error: 'Session route not found.' });
+      return;
+    }
+
+    const session = sessions.get(code);
+    if (!session) {
+      sendJson(res, 404, { error: 'Invite code was not found.' });
+      return;
+    }
+
+    try {
+      const body = await readJsonBody(req);
+      const clientId = typeof body.clientId === 'string' ? body.clientId : '';
+      const targetClientId = typeof body.targetClientId === 'string' ? body.targetClientId : '';
+      if (clientId !== session.hostClientId) {
+        sendJson(res, 403, { error: 'Only the host can kick players.' });
+        return;
+      }
+
+      const target = session.members.get(targetClientId);
+      if (!target || target.isHost) {
+        sendJson(res, 404, { error: 'Kick target was not found.' });
+        return;
+      }
+
+      const host = session.members.get(session.hostClientId);
+      removeMember(session, target, {
+        byName: host?.name ?? 'Host',
+        kickedReason: 'You were removed by the host.',
+        closeSocketReason: 'Kicked by host',
+      });
+      broadcastRoomState(session);
+
+      sendJson(res, 200, {
+        kicked: true,
+        code,
+        targetClientId,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Invalid kick payload.';
       sendJson(res, 400, { error: message });
     }
     return;

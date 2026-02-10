@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 
-import { closeOnlineSession, getOnlineSession, multiplayerSocketUrl } from '../online/multiplayerApi';
+import { closeOnlineSession, getOnlineSession, kickOnlineMember, multiplayerSocketUrl } from '../online/multiplayerApi';
 import {
   JOINER_KEY_TO_CONTROL,
   buildDigitalInputPayload,
@@ -135,6 +135,7 @@ export function OnlineSessionPage() {
   const [latencyMs, setLatencyMs] = useState<number>();
   const [sessionClosedReason, setSessionClosedReason] = useState<string>();
   const [endingSession, setEndingSession] = useState(false);
+  const [kickingClientId, setKickingClientId] = useState<string>();
   const [hostRomSelectionId, setHostRomSelectionId] = useState(NO_ROOM_ROM);
   const [savingHostRomSelection, setSavingHostRomSelection] = useState(false);
 
@@ -335,6 +336,16 @@ export function OnlineSessionPage() {
         if (message.type === 'session_closed') {
           sessionClosedRef.current = true;
           setSessionClosedReason(message.reason || SESSION_CLOSE_REASON_DEFAULT);
+          clearReconnectTimer();
+          clearHeartbeatTimer();
+          setSocketStatus('disconnected');
+          socket.close();
+          return;
+        }
+
+        if (message.type === 'kicked') {
+          sessionClosedRef.current = true;
+          setSessionClosedReason(message.reason || 'You were removed by host.');
           clearReconnectTimer();
           clearHeartbeatTimer();
           setSocketStatus('disconnected');
@@ -621,6 +632,43 @@ export function OnlineSessionPage() {
     }
   };
 
+  const onKickMember = async (target: MultiplayerMember): Promise<void> => {
+    if (!isHost || !normalizedCode || !clientId || target.isHost) {
+      return;
+    }
+
+    const confirmed = window.confirm(`Kick ${target.name} (${slotLabel(target.slot)}) from this session?`);
+    if (!confirmed) {
+      return;
+    }
+
+    setKickingClientId(target.clientId);
+    try {
+      await kickOnlineMember({
+        code: normalizedCode,
+        clientId,
+        targetClientId: target.clientId,
+      });
+
+      setSession((current) => {
+        if (!current) {
+          return current;
+        }
+
+        return {
+          ...current,
+          members: current.members.filter((member) => member.clientId !== target.clientId),
+        };
+      });
+      setClipboardFeedback(`Removed ${target.name} from the session.`);
+    } catch (kickError) {
+      const message = kickError instanceof Error ? kickError.message : 'Failed to remove player.';
+      setError(message);
+    } finally {
+      setKickingClientId(undefined);
+    }
+  };
+
   if (!normalizedCode || !clientId) {
     return (
       <section className="panel">
@@ -680,9 +728,23 @@ export function OnlineSessionPage() {
             const member = membersBySlot.get(slot);
             return (
               <li key={slot}>
-                <strong>{slotLabel(slot)}:</strong>{' '}
-                {member ? `${member.name}${member.isHost ? ' (Host)' : ''}` : 'Open slot'}
-                {member ? ` • ${member.connected ? 'connected' : 'disconnected'}` : ''}
+                <div className="room-player-row">
+                  <span>
+                    <strong>{slotLabel(slot)}:</strong>{' '}
+                    {member ? `${member.name}${member.isHost ? ' (Host)' : ''}` : 'Open slot'}
+                    {member ? ` • ${member.connected ? 'connected' : 'disconnected'}` : ''}
+                  </span>
+                  {isHost && member && !member.isHost ? (
+                    <button
+                      type="button"
+                      className="danger-button inline-danger-button"
+                      onClick={() => void onKickMember(member)}
+                      disabled={Boolean(kickingClientId)}
+                    >
+                      {kickingClientId === member.clientId ? 'Removing…' : 'Kick'}
+                    </button>
+                  ) : null}
+                </div>
               </li>
             );
           })}

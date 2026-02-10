@@ -24,6 +24,7 @@ A browser-based N64 emulator app scaffold with:
 - WebSocket heartbeat (`ping`/`pong`) from host and joiners for better long-session stability
 - Host moderation: explicit “End Session” control that disconnects room members with a clear reason
 - In-room host ROM picker: set/clear room ROM directly from session page (no navigation required)
+- Host moderation: kick specific players from room without ending the whole session
 
 ## Current core status
 
@@ -86,6 +87,7 @@ npm run test:e2e -- e2e/online-session.smoke.spec.ts
 npm run test:e2e -- e2e/online-chat.smoke.spec.ts
 npm run test:e2e -- e2e/online-session-end.smoke.spec.ts
 npm run test:e2e -- e2e/online-room-rom-picker.smoke.spec.ts
+npm run test:e2e -- e2e/online-kick-member.smoke.spec.ts
 ```
 
 ## Online multiplayer architecture (MVP)
@@ -99,6 +101,7 @@ npm run test:e2e -- e2e/online-room-rom-picker.smoke.spec.ts
 - Any connected player can send room chat messages to all other members.
 - Host can end a session immediately for all connected clients.
 - Host can assign or clear the room ROM directly in the session UI.
+- Host can remove an individual member while keeping the room alive.
 
 ## Browser support
 
@@ -132,6 +135,7 @@ Included tests cover:
 - End-to-end online room chat between host and joiner
 - End-to-end host-initiated session close notification for joiners
 - End-to-end host room-ROM picker flow shared to joiners
+- End-to-end host kick-member flow with kicked-client notification
 - End-to-end host choose-later flow that carries session params from Online room to Library and Play
 - Save keying by ROM hash
 - Catalog import/index flows

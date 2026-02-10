@@ -2,6 +2,7 @@ import type {
   CloseSessionResponse,
   CreateSessionResponse,
   GetSessionResponse,
+  KickMemberResponse,
   JoinSessionResponse,
 } from '../types/multiplayer';
 
@@ -77,6 +78,26 @@ export async function closeOnlineSession(input: {
   });
 
   return parseJsonOrThrow<CloseSessionResponse>(response);
+}
+
+export async function kickOnlineMember(input: {
+  code: string;
+  clientId: string;
+  targetClientId: string;
+}): Promise<KickMemberResponse> {
+  const normalized = sanitizeInviteCode(input.code);
+  const response = await fetch(`/api/multiplayer/sessions/${encodeURIComponent(normalized)}/kick`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      clientId: input.clientId,
+      targetClientId: input.targetClientId,
+    }),
+  });
+
+  return parseJsonOrThrow<KickMemberResponse>(response);
 }
 
 export function multiplayerSocketUrl(code: string, clientId: string): string {

@@ -36,6 +36,12 @@ export interface CloseSessionResponse {
   code: string;
 }
 
+export interface KickMemberResponse {
+  kicked: true;
+  code: string;
+  targetClientId: string;
+}
+
 export interface GetSessionResponse {
   session: MultiplayerSessionSnapshot;
 }
@@ -83,6 +89,12 @@ export type MultiplayerSocketMessage =
   | {
       type: 'session_closed';
       reason: string;
+      at: number;
+    }
+  | {
+      type: 'kicked';
+      reason: string;
+      byName: string;
       at: number;
     }
   | {
