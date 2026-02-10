@@ -2,6 +2,12 @@ import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 
 import { createOnlineSession, joinOnlineSession } from '../online/multiplayerApi';
+import {
+  clearRecentOnlineSessions,
+  getRecentOnlineSessions,
+  rememberOnlineSession,
+  type RecentOnlineSession,
+} from '../storage/appSettings';
 import { useAppStore } from '../state/appStore';
 
 const NO_ROM_SELECTED = '__none__';
@@ -20,10 +26,28 @@ export function OnlinePage() {
   const [error, setError] = useState<string>();
   const [creating, setCreating] = useState(false);
   const [joining, setJoining] = useState(false);
+  const [recentSessions, setRecentSessions] = useState<RecentOnlineSession[]>([]);
+  const [loadingRecentSessions, setLoadingRecentSessions] = useState(true);
 
   useEffect(() => {
     void refreshRoms();
   }, [refreshRoms]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadRecentSessions = async (): Promise<void> => {
+      const recent = await getRecentOnlineSessions();
+      if (!cancelled) {
+        setRecentSessions(recent);
+        setLoadingRecentSessions(false);
+      }
+    };
+
+    void loadRecentSessions();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const selectedRom = useMemo(
     () => roms.find((rom) => rom.id === selectedRomId && selectedRomId !== NO_ROM_SELECTED),
@@ -37,6 +61,13 @@ export function OnlinePage() {
       const created = await createOnlineSession({
         hostName,
         romId: selectedRom?.id,
+        romTitle: selectedRom?.title,
+      });
+      await rememberOnlineSession({
+        code: created.code,
+        clientId: created.clientId,
+        playerName: hostName,
+        role: 'host',
         romTitle: selectedRom?.title,
       });
       navigate(`/online/session/${created.code}?clientId=${encodeURIComponent(created.clientId)}`);
@@ -56,6 +87,13 @@ export function OnlinePage() {
         code: joinCode,
         name: joinName,
       });
+      await rememberOnlineSession({
+        code: joined.code,
+        clientId: joined.clientId,
+        playerName: joinName,
+        role: 'guest',
+        romTitle: joined.session.romTitle,
+      });
       navigate(`/online/session/${joined.code}?clientId=${encodeURIComponent(joined.clientId)}`);
     } catch (joinError) {
       const message = joinError instanceof Error ? joinError.message : 'Failed to join session.';
@@ -63,6 +101,11 @@ export function OnlinePage() {
     } finally {
       setJoining(false);
     }
+  };
+
+  const onClearRecentSessions = async (): Promise<void> => {
+    await clearRecentOnlineSessions();
+    setRecentSessions([]);
   };
 
   return (
@@ -151,6 +194,41 @@ export function OnlinePage() {
           </div>
         </section>
       </div>
+
+      <section className="panel">
+        <h2>Recent Sessions</h2>
+        {loadingRecentSessions ? <p>Loading recent sessions…</p> : null}
+        {!loadingRecentSessions && recentSessions.length === 0 ? (
+          <p>No recent sessions yet. Start or join a game to populate this list.</p>
+        ) : null}
+        {recentSessions.length > 0 ? (
+          <ul className="recent-session-list">
+            {recentSessions.map((entry) => (
+              <li key={`${entry.code}:${entry.clientId}`}>
+                <div>
+                  <p>
+                    <strong>{entry.code}</strong> • {entry.role === 'host' ? 'Host' : 'Guest'} • {entry.playerName}
+                  </p>
+                  <p className="online-subtle">
+                    {entry.romTitle ? `${entry.romTitle} • ` : ''}
+                    Last active {new Date(entry.lastActiveAt).toLocaleString()}
+                  </p>
+                </div>
+                <Link to={`/online/session/${entry.code}?clientId=${encodeURIComponent(entry.clientId)}`}>
+                  Reopen
+                </Link>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+        {recentSessions.length > 0 ? (
+          <div className="wizard-actions">
+            <button type="button" onClick={() => void onClearRecentSessions()}>
+              Clear Recent Sessions
+            </button>
+          </div>
+        ) : null}
+      </section>
     </section>
   );
 }

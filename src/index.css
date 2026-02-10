@@ -589,6 +589,29 @@ label {
   gap: 0.6rem;
 }
 
+.recent-session-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.58rem;
+}
+
+.recent-session-list li {
+  border: 1px solid var(--border);
+  border-radius: 0.68rem;
+  padding: 0.62rem 0.72rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.7rem;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.recent-session-list p {
+  margin: 0;
+}
+
 @media (max-width: 900px) {
   .wizard-main {
     grid-template-columns: 1fr;
@@ -628,6 +651,11 @@ label {
   }
 
   .room-player-row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .recent-session-list li {
     align-items: flex-start;
     flex-direction: column;
   }
