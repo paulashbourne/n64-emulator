@@ -1,4 +1,5 @@
 import type {
+  CloseSessionResponse,
   CreateSessionResponse,
   GetSessionResponse,
   JoinSessionResponse,
@@ -58,6 +59,24 @@ export async function getOnlineSession(code: string): Promise<GetSessionResponse
   const normalized = sanitizeInviteCode(code);
   const response = await fetch(`/api/multiplayer/sessions/${encodeURIComponent(normalized)}`);
   return parseJsonOrThrow<GetSessionResponse>(response);
+}
+
+export async function closeOnlineSession(input: {
+  code: string;
+  clientId: string;
+}): Promise<CloseSessionResponse> {
+  const normalized = sanitizeInviteCode(input.code);
+  const response = await fetch(`/api/multiplayer/sessions/${encodeURIComponent(normalized)}/close`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      clientId: input.clientId,
+    }),
+  });
+
+  return parseJsonOrThrow<CloseSessionResponse>(response);
 }
 
 export function multiplayerSocketUrl(code: string, clientId: string): string {

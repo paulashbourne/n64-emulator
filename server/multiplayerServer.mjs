@@ -8,6 +8,7 @@ const PORT = Number(process.env.MULTIPLAYER_PORT ?? 8787);
 const MAX_PLAYERS = 4;
 const HOST_RECONNECT_GRACE_MS = 120_000;
 const MEMBER_RECONNECT_GRACE_MS = 20_000;
+const CHAT_COOLDOWN_MS = 250;
 const MAX_CHAT_MESSAGES = 60;
 const INVITE_CODE_LENGTH = 6;
 const INVITE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -20,6 +21,7 @@ const INVITE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
  *   isHost: boolean;
  *   connected: boolean;
  *   joinedAt: number;
+ *   lastChatAt?: number;
  *   disconnectTimer?: NodeJS.Timeout;
  *   socket?: import('ws').WebSocket;
  * }} SessionMember
@@ -166,8 +168,12 @@ function findOpenPlayerSlot(session) {
 }
 
 function parseSessionCodeFromPath(pathname) {
-  const match = pathname.match(/^\/api\/multiplayer\/sessions\/([A-Z0-9]{6})(?:\/join)?$/);
+  const match = pathname.match(/^\/api\/multiplayer\/sessions\/([A-Z0-9]{6})(?:\/(join|close))?$/);
   return match ? match[1] : null;
+}
+
+function isSessionBasePath(pathname) {
+  return /^\/api\/multiplayer\/sessions\/[A-Z0-9]{6}$/.test(pathname);
 }
 
 function handleWsMessage(session, member, rawMessage) {
@@ -222,6 +228,11 @@ function handleWsMessage(session, member, rawMessage) {
     if (!text) {
       return;
     }
+    const now = Date.now();
+    if (member.lastChatAt && now - member.lastChatAt < CHAT_COOLDOWN_MS) {
+      return;
+    }
+    member.lastChatAt = now;
 
     const entry = {
       id: randomUUID(),
@@ -229,7 +240,7 @@ function handleWsMessage(session, member, rawMessage) {
       fromName: member.name,
       fromSlot: member.slot,
       message: text,
-      at: Date.now(),
+      at: now,
     };
 
     session.chat.push(entry);
@@ -241,7 +252,26 @@ function handleWsMessage(session, member, rawMessage) {
   }
 }
 
-function closeSession(session) {
+function broadcastSessionClosed(session, reason) {
+  const payload = JSON.stringify({
+    type: 'session_closed',
+    reason,
+    at: Date.now(),
+  });
+  broadcastToConnectedMembers(session, payload);
+}
+
+function closeSession(session, options = {}) {
+  const {
+    notify = false,
+    notifyReason = 'Session closed.',
+    socketReason = 'Session closed',
+  } = options;
+
+  if (notify) {
+    broadcastSessionClosed(session, notifyReason);
+  }
+
   if (session.hostCloseTimer) {
     clearTimeout(session.hostCloseTimer);
     session.hostCloseTimer = undefined;
@@ -253,7 +283,7 @@ function closeSession(session) {
       member.disconnectTimer = undefined;
     }
     if (member.socket && member.socket.readyState === member.socket.OPEN) {
-      member.socket.close(1000, 'Session closed');
+      member.socket.close(1000, socketReason);
     }
   }
   sessions.delete(session.code);
@@ -266,7 +296,11 @@ function scheduleSessionCloseIfHostDoesNotReturn(session) {
 
   session.hostCloseTimer = setTimeout(() => {
     if (sessions.has(session.code)) {
-      closeSession(session);
+      closeSession(session, {
+        notify: true,
+        notifyReason: 'Host disconnected for too long. Session closed.',
+        socketReason: 'Host disconnected',
+      });
     }
   }, HOST_RECONNECT_GRACE_MS);
 }
@@ -409,7 +443,44 @@ const httpServer = createServer(async (req, res) => {
     return;
   }
 
-  if (req.method === 'GET' && pathname.startsWith('/api/multiplayer/sessions/')) {
+  if (req.method === 'POST' && pathname.startsWith('/api/multiplayer/sessions/') && pathname.endsWith('/close')) {
+    const code = parseSessionCodeFromPath(pathname);
+    if (!code) {
+      sendJson(res, 404, { error: 'Session route not found.' });
+      return;
+    }
+
+    const session = sessions.get(code);
+    if (!session) {
+      sendJson(res, 404, { error: 'Invite code was not found.' });
+      return;
+    }
+
+    try {
+      const body = await readJsonBody(req);
+      const clientId = typeof body.clientId === 'string' ? body.clientId : '';
+      if (clientId !== session.hostClientId) {
+        sendJson(res, 403, { error: 'Only the host can close this session.' });
+        return;
+      }
+
+      closeSession(session, {
+        notify: true,
+        notifyReason: 'Host ended the session.',
+        socketReason: 'Host ended session',
+      });
+      sendJson(res, 200, {
+        closed: true,
+        code,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Invalid close payload.';
+      sendJson(res, 400, { error: message });
+    }
+    return;
+  }
+
+  if (req.method === 'GET' && isSessionBasePath(pathname)) {
     const code = parseSessionCodeFromPath(pathname);
     if (!code) {
       sendJson(res, 404, { error: 'Session route not found.' });

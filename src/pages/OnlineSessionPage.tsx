@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 
-import { getOnlineSession, multiplayerSocketUrl } from '../online/multiplayerApi';
+import { closeOnlineSession, getOnlineSession, multiplayerSocketUrl } from '../online/multiplayerApi';
 import {
   JOINER_KEY_TO_CONTROL,
   buildDigitalInputPayload,
@@ -26,6 +26,7 @@ const REMOTE_LOG_LIMIT = 40;
 const SOCKET_RECONNECT_DELAY_MS = 1_500;
 const SOCKET_HEARTBEAT_INTERVAL_MS = 10_000;
 const CHAT_MAX_LENGTH = 280;
+const SESSION_CLOSE_REASON_DEFAULT = 'Session closed.';
 
 interface RemoteInputEvent {
   fromName: string;
@@ -90,6 +91,9 @@ export function OnlineSessionPage() {
 
   const socketRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<number | null>(null);
+  const heartbeatTimerRef = useRef<number | null>(null);
+  const pendingPingSentAtRef = useRef<number | null>(null);
+  const sessionClosedRef = useRef(false);
   const pressedKeyBindingsRef = useRef(new Map<string, N64ControlTarget>());
   const pressedGamepadControlsRef = useRef(new Set<N64ControlTarget>());
   const [socketStatus, setSocketStatus] = useState<'connecting' | 'connected' | 'disconnected'>('connecting');
@@ -99,6 +103,9 @@ export function OnlineSessionPage() {
   const [remoteInputs, setRemoteInputs] = useState<RemoteInputEvent[]>([]);
   const [gamepadConnected, setGamepadConnected] = useState(false);
   const [chatDraft, setChatDraft] = useState('');
+  const [latencyMs, setLatencyMs] = useState<number>();
+  const [sessionClosedReason, setSessionClosedReason] = useState<string>();
+  const [endingSession, setEndingSession] = useState(false);
 
   const normalizedCode = (code ?? '').toUpperCase();
   const sessionContext =
@@ -132,6 +139,7 @@ export function OnlineSessionPage() {
     typeof window === 'undefined' || normalizedCode.length === 0
       ? ''
       : buildInviteJoinUrl(normalizedCode, window.location.origin);
+  const canSendRealtimeInput = socketStatus === 'connected' && !sessionClosedReason;
 
   useEffect(() => {
     if (!normalizedCode) {
@@ -170,6 +178,7 @@ export function OnlineSessionPage() {
     }
 
     let cancelled = false;
+    sessionClosedRef.current = false;
 
     const clearReconnectTimer = (): void => {
       if (reconnectTimerRef.current !== null) {
@@ -178,8 +187,24 @@ export function OnlineSessionPage() {
       }
     };
 
+    const clearHeartbeatTimer = (): void => {
+      if (heartbeatTimerRef.current !== null) {
+        window.clearInterval(heartbeatTimerRef.current);
+        heartbeatTimerRef.current = null;
+      }
+      pendingPingSentAtRef.current = null;
+    };
+
+    const sendPing = (socket: WebSocket): void => {
+      if (socket.readyState !== WebSocket.OPEN) {
+        return;
+      }
+      pendingPingSentAtRef.current = Date.now();
+      socket.send(JSON.stringify({ type: 'ping' }));
+    };
+
     const scheduleReconnect = (): void => {
-      if (cancelled || reconnectTimerRef.current !== null) {
+      if (cancelled || reconnectTimerRef.current !== null || sessionClosedRef.current) {
         return;
       }
 
@@ -197,14 +222,6 @@ export function OnlineSessionPage() {
       setSocketStatus('connecting');
       const socket = new WebSocket(multiplayerSocketUrl(normalizedCode, clientId));
       socketRef.current = socket;
-      let heartbeatTimer: number | undefined;
-
-      const clearHeartbeatTimer = (): void => {
-        if (heartbeatTimer !== undefined) {
-          window.clearInterval(heartbeatTimer);
-          heartbeatTimer = undefined;
-        }
-      };
 
       socket.onopen = () => {
         if (cancelled) {
@@ -212,18 +229,27 @@ export function OnlineSessionPage() {
         }
 
         setSocketStatus('connected');
+        setSessionClosedReason(undefined);
         setError(undefined);
+        setLatencyMs(undefined);
+        clearHeartbeatTimer();
+        sendPing(socket);
 
-        heartbeatTimer = window.setInterval(() => {
-          if (socket.readyState === WebSocket.OPEN) {
-            socket.send(JSON.stringify({ type: 'ping' }));
-          }
+        heartbeatTimerRef.current = window.setInterval(() => {
+          sendPing(socket);
         }, SOCKET_HEARTBEAT_INTERVAL_MS);
       };
 
       socket.onmessage = (event) => {
         const message = typeof event.data === 'string' ? tryParseSocketMessage(event.data) : null;
         if (!message) {
+          return;
+        }
+
+        if (message.type === 'pong') {
+          if (pendingPingSentAtRef.current) {
+            setLatencyMs(Math.max(1, Date.now() - pendingPingSentAtRef.current));
+          }
           return;
         }
 
@@ -259,23 +285,37 @@ export function OnlineSessionPage() {
               chat: [...current.chat, message.entry].slice(-60),
             };
           });
+          return;
+        }
+
+        if (message.type === 'session_closed') {
+          sessionClosedRef.current = true;
+          setSessionClosedReason(message.reason || SESSION_CLOSE_REASON_DEFAULT);
+          clearReconnectTimer();
+          clearHeartbeatTimer();
+          setSocketStatus('disconnected');
+          socket.close();
         }
       };
 
       socket.onclose = () => {
+        clearHeartbeatTimer();
         if (cancelled) {
           return;
         }
-        clearHeartbeatTimer();
+
         setSocketStatus('disconnected');
+        if (sessionClosedRef.current) {
+          return;
+        }
         scheduleReconnect();
       };
 
       socket.onerror = () => {
+        clearHeartbeatTimer();
         if (cancelled) {
           return;
         }
-        clearHeartbeatTimer();
         socket.close();
       };
     };
@@ -285,6 +325,7 @@ export function OnlineSessionPage() {
     return () => {
       cancelled = true;
       clearReconnectTimer();
+      clearHeartbeatTimer();
       const socket = socketRef.current;
       if (socket) {
         socket.close();
@@ -294,6 +335,10 @@ export function OnlineSessionPage() {
   }, [normalizedCode, clientId]);
 
   const sendQuickTap = (control: N64ControlTarget): void => {
+    if (!canSendRealtimeInput) {
+      return;
+    }
+
     sendInputPayload(socketRef.current, buildDigitalInputPayload(control, true));
 
     window.setTimeout(() => {
@@ -302,7 +347,7 @@ export function OnlineSessionPage() {
   };
 
   useEffect(() => {
-    if (isHost) {
+    if (isHost || !canSendRealtimeInput) {
       return;
     }
 
@@ -362,10 +407,10 @@ export function OnlineSessionPage() {
       window.removeEventListener('blur', releaseAllPressedKeys);
       releaseAllPressedKeys();
     };
-  }, [isHost]);
+  }, [isHost, canSendRealtimeInput]);
 
   useEffect(() => {
-    if (isHost) {
+    if (isHost || !canSendRealtimeInput) {
       return;
     }
 
@@ -415,7 +460,7 @@ export function OnlineSessionPage() {
       releaseAllPressedGamepadControls();
       setGamepadConnected(false);
     };
-  }, [isHost]);
+  }, [isHost, canSendRealtimeInput]);
 
   const setClipboardFeedback = (message: string): void => {
     setClipboardMessage(message);
@@ -443,6 +488,10 @@ export function OnlineSessionPage() {
   };
 
   const onSendChat = (): void => {
+    if (!canSendRealtimeInput) {
+      return;
+    }
+
     const message = chatDraft.trim();
     if (!message) {
       return;
@@ -463,6 +512,36 @@ export function OnlineSessionPage() {
     setChatDraft('');
   };
 
+  const onEndSession = async (): Promise<void> => {
+    if (!isHost || !normalizedCode || !clientId) {
+      return;
+    }
+
+    const confirmed = window.confirm('End this session for all players?');
+    if (!confirmed) {
+      return;
+    }
+
+    setEndingSession(true);
+    try {
+      await closeOnlineSession({
+        code: normalizedCode,
+        clientId,
+      });
+      sessionClosedRef.current = true;
+      setSessionClosedReason('You ended the session.');
+      const socket = socketRef.current;
+      if (socket) {
+        socket.close();
+      }
+    } catch (closeError) {
+      const message = closeError instanceof Error ? closeError.message : 'Failed to close session.';
+      setError(message);
+    } finally {
+      setEndingSession(false);
+    }
+  };
+
   if (!normalizedCode || !clientId) {
     return (
       <section className="panel">
@@ -480,6 +559,9 @@ export function OnlineSessionPage() {
         <p>
           Connection: <strong>{socketStatus}</strong> • Connected players: <strong>{connectedPlayers}/4</strong>
         </p>
+        <p>
+          Latency: <strong>{latencyMs ? `${latencyMs} ms` : socketStatus === 'connected' ? 'Measuring…' : 'Unavailable'}</strong>
+        </p>
         {currentMember ? (
           <p>
             You are <strong>{slotLabel(currentMember.slot)}</strong>
@@ -488,6 +570,7 @@ export function OnlineSessionPage() {
         ) : (
           <p className="warning-text">Waiting for player assignment…</p>
         )}
+        {sessionClosedReason ? <p className="error-text">{sessionClosedReason}</p> : null}
         {session?.romTitle ? <p>Host ROM: {session.romTitle}</p> : <p>No host ROM selected yet.</p>}
         <p>
           Invite code: <strong>{normalizedCode}</strong>
@@ -501,6 +584,11 @@ export function OnlineSessionPage() {
           <button type="button" onClick={() => void onCopyInviteLink()} disabled={!inviteJoinUrl}>
             Copy Invite Link
           </button>
+          {isHost ? (
+            <button type="button" className="danger-button" onClick={() => void onEndSession()} disabled={endingSession}>
+              {endingSession ? 'Ending…' : 'End Session'}
+            </button>
+          ) : null}
           <Link to="/online">Back to Online</Link>
         </div>
       </header>
@@ -573,7 +661,7 @@ export function OnlineSessionPage() {
                 key={entry.label}
                 type="button"
                 onClick={() => sendQuickTap(entry.control)}
-                disabled={socketStatus !== 'connected'}
+                disabled={!canSendRealtimeInput}
               >
                 {entry.label}
               </button>
@@ -614,10 +702,10 @@ export function OnlineSessionPage() {
               onChange={(event) => setChatDraft(event.target.value)}
               maxLength={CHAT_MAX_LENGTH}
               placeholder="Type a message for everyone in this room…"
-              disabled={socketStatus !== 'connected'}
+              disabled={!canSendRealtimeInput}
             />
           </label>
-          <button type="submit" disabled={socketStatus !== 'connected' || chatDraft.trim().length === 0}>
+          <button type="submit" disabled={!canSendRealtimeInput || chatDraft.trim().length === 0}>
             Send
           </button>
         </form>

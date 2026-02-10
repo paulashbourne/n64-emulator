@@ -31,6 +31,11 @@ export interface JoinSessionResponse {
   session: MultiplayerSessionSnapshot;
 }
 
+export interface CloseSessionResponse {
+  closed: true;
+  code: string;
+}
+
 export interface GetSessionResponse {
   session: MultiplayerSessionSnapshot;
 }
@@ -74,6 +79,11 @@ export type MultiplayerSocketMessage =
   | {
       type: 'chat';
       entry: MultiplayerChatEntry;
+    }
+  | {
+      type: 'session_closed';
+      reason: string;
+      at: number;
     }
   | {
       type: 'pong';

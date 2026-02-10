@@ -78,6 +78,9 @@ export function PlayPage() {
   const lastAppliedProfileRef = useRef<string | null>(null);
   const onlineSocketRef = useRef<WebSocket | null>(null);
   const onlineReconnectTimerRef = useRef<number | null>(null);
+  const onlineHeartbeatTimerRef = useRef<number | null>(null);
+  const onlinePendingPingSentAtRef = useRef<number | null>(null);
+  const onlineSessionClosedRef = useRef(false);
   const onlineRomDescriptorRef = useRef<{ romId?: string; romTitle?: string }>({
     romId: decodedRomId,
     romTitle: undefined,
@@ -99,6 +102,7 @@ export function PlayPage() {
   const [onlineRemoteEventsApplied, setOnlineRemoteEventsApplied] = useState(0);
   const [onlineLastRemoteInput, setOnlineLastRemoteInput] = useState<string>();
   const [onlineConnectedMembers, setOnlineConnectedMembers] = useState(1);
+  const [onlineLatencyMs, setOnlineLatencyMs] = useState<number>();
 
   const activeProfile = useMemo<ControllerProfile | undefined>(
     () => profiles.find((profile) => profile.profileId === activeProfileId),
@@ -263,10 +267,13 @@ export function PlayPage() {
       setOnlineRemoteEventsApplied(0);
       setOnlineLastRemoteInput(undefined);
       setOnlineConnectedMembers(1);
+      setOnlineLatencyMs(undefined);
+      onlineSessionClosedRef.current = false;
       return;
     }
 
     let cancelled = false;
+    onlineSessionClosedRef.current = false;
 
     const clearReconnectTimer = (): void => {
       if (onlineReconnectTimerRef.current !== null) {
@@ -275,8 +282,24 @@ export function PlayPage() {
       }
     };
 
+    const clearHeartbeatTimer = (): void => {
+      if (onlineHeartbeatTimerRef.current !== null) {
+        window.clearInterval(onlineHeartbeatTimerRef.current);
+        onlineHeartbeatTimerRef.current = null;
+      }
+      onlinePendingPingSentAtRef.current = null;
+    };
+
+    const sendPing = (socket: WebSocket): void => {
+      if (socket.readyState !== WebSocket.OPEN) {
+        return;
+      }
+      onlinePendingPingSentAtRef.current = Date.now();
+      socket.send(JSON.stringify({ type: 'ping' }));
+    };
+
     const scheduleReconnect = (): void => {
-      if (cancelled || onlineReconnectTimerRef.current !== null) {
+      if (cancelled || onlineReconnectTimerRef.current !== null || onlineSessionClosedRef.current) {
         return;
       }
 
@@ -295,14 +318,6 @@ export function PlayPage() {
 
       const socket = new WebSocket(multiplayerSocketUrl(onlineCode, onlineClientId));
       onlineSocketRef.current = socket;
-      let heartbeatTimer: number | undefined;
-
-      const clearHeartbeatTimer = (): void => {
-        if (heartbeatTimer !== undefined) {
-          window.clearInterval(heartbeatTimer);
-          heartbeatTimer = undefined;
-        }
-      };
 
       socket.onopen = () => {
         if (cancelled) {
@@ -310,6 +325,7 @@ export function PlayPage() {
         }
 
         setOnlineRelayStatus('connected');
+        setOnlineLatencyMs(undefined);
         const { romId: activeRomId, romTitle: activeRomTitle } = onlineRomDescriptorRef.current;
         socket.send(
           JSON.stringify({
@@ -318,11 +334,10 @@ export function PlayPage() {
             romTitle: activeRomTitle,
           }),
         );
-
-        heartbeatTimer = window.setInterval(() => {
-          if (socket.readyState === WebSocket.OPEN) {
-            socket.send(JSON.stringify({ type: 'ping' }));
-          }
+        clearHeartbeatTimer();
+        sendPing(socket);
+        onlineHeartbeatTimerRef.current = window.setInterval(() => {
+          sendPing(socket);
         }, ONLINE_HEARTBEAT_INTERVAL_MS);
       };
 
@@ -336,9 +351,26 @@ export function PlayPage() {
           return;
         }
 
+        if (message.type === 'pong') {
+          if (onlinePendingPingSentAtRef.current) {
+            setOnlineLatencyMs(Math.max(1, Date.now() - onlinePendingPingSentAtRef.current));
+          }
+          return;
+        }
+
         if (message.type === 'room_state') {
           const connectedMembers = message.session.members.filter((member) => member.connected).length;
           setOnlineConnectedMembers(Math.max(connectedMembers, 1));
+          return;
+        }
+
+        if (message.type === 'session_closed') {
+          onlineSessionClosedRef.current = true;
+          clearReconnectTimer();
+          clearHeartbeatTimer();
+          setOnlineRelayStatus('offline');
+          setEmulatorWarning(message.reason || 'Online session closed.');
+          socket.close();
           return;
         }
 
@@ -362,20 +394,23 @@ export function PlayPage() {
       };
 
       socket.onclose = () => {
+        clearHeartbeatTimer();
         if (cancelled) {
           return;
         }
-        clearHeartbeatTimer();
-
+        if (onlineSessionClosedRef.current) {
+          setOnlineRelayStatus('offline');
+          return;
+        }
         setOnlineRelayStatus('connecting');
         scheduleReconnect();
       };
 
       socket.onerror = () => {
+        clearHeartbeatTimer();
         if (cancelled) {
           return;
         }
-        clearHeartbeatTimer();
         socket.close();
       };
     };
@@ -385,13 +420,14 @@ export function PlayPage() {
     return () => {
       cancelled = true;
       clearReconnectTimer();
+      clearHeartbeatTimer();
       const socket = onlineSocketRef.current;
       if (socket) {
         socket.close();
         onlineSocketRef.current = null;
       }
     };
-  }, [onlineClientId, onlineCode, onlineRelayEnabled]);
+  }, [onlineClientId, onlineCode, onlineRelayEnabled, setEmulatorWarning]);
 
   const onPauseResume = (): void => {
     const emulator = window.EJS_emulator;
@@ -550,6 +586,11 @@ export function PlayPage() {
           {onlineRelayEnabled ? (
             <p>
               Online relay: {onlineRelayStatus} • Code: {onlineCode} • Players connected: {onlineConnectedMembers}/4 • Remote inputs applied: {onlineRemoteEventsApplied}
+            </p>
+          ) : null}
+          {onlineRelayEnabled ? (
+            <p>
+              Relay latency: {onlineLatencyMs ? `${onlineLatencyMs} ms` : onlineRelayStatus === 'connected' ? 'Measuring…' : 'Unavailable'}
             </p>
           ) : null}
           {onlineRelayEnabled && onlineLastRemoteInput ? <p>Last remote input: {onlineLastRemoteInput}</p> : null}
