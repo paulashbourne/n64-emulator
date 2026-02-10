@@ -16,6 +16,7 @@ A browser-based N64 emulator app scaffold with:
 - Library view preferences persist (sort mode and favorites-only filter)
 - One-click controller keyboard preset in the mapping wizard
 - Keyboard shortcuts on play screen: `Space` pause/resume, `R` reset, `M` open mapper, `Esc` close mapper
+- Online session MVP: host/join via invite code with up to 4 player slots and live remote input relay
 
 ## Current core status
 
@@ -40,9 +41,16 @@ npm install
 npm run dev
 ```
 
+For online multiplayer flows in local development, run the coordinator server too (second terminal):
+
+```bash
+npm run dev:multiplayer
+```
+
 ## Scripts
 
 - `npm run dev` - start development server
+- `npm run dev:multiplayer` - start multiplayer coordinator server on `127.0.0.1:8787`
 - `npm run build` - type-check and create production build
 - `npm run test` - run Vitest in watch mode
 - `npm run test:run` - run tests once
@@ -67,7 +75,17 @@ npm run test:e2e -- e2e/library-size-sort.smoke.spec.ts
 npm run test:e2e -- e2e/library-favorites.smoke.spec.ts
 npm run test:e2e -- e2e/library-sort-preference.smoke.spec.ts
 npm run test:e2e -- e2e/duplicate-import.smoke.spec.ts
+npm run test:e2e -- e2e/online-session.smoke.spec.ts
 ```
+
+## Online multiplayer architecture (MVP)
+
+- Decision: central coordinator + host-authoritative game runtime.
+- Host creates a session and shares a 6-character invite code.
+- Joiners claim the first open slot (`Player 2` through `Player 4`).
+- Coordinator tracks room membership and relays remote controller input messages to host.
+- Current implementation focuses on robust room lifecycle + invite flow + input relay channel.
+- Next step after this MVP: connect relayed remote inputs directly into the host emulator control state.
 
 ## Browser support
 
@@ -97,5 +115,6 @@ Included tests cover:
 - Gamepad capture edge detection when controls start held
 - Duplicate ROM import dedupe handling
 - Keyboard preset mapping flow in the controller wizard
+- End-to-end online host/join invite-code flow with two browser clients
 - Save keying by ROM hash
 - Catalog import/index flows

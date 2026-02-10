@@ -436,6 +436,35 @@ label {
   background: rgba(255, 93, 115, 0.22);
 }
 
+.online-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 0.8rem;
+}
+
+.room-player-list,
+.remote-input-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.5rem;
+}
+
+.room-player-list li,
+.remote-input-list li {
+  padding: 0.55rem 0.65rem;
+  border-radius: 0.62rem;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.online-input-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 0.6rem;
+}
+
 @media (max-width: 900px) {
   .wizard-main {
     grid-template-columns: 1fr;

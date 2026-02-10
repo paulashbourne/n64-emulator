@@ -1,6 +1,8 @@
 import { NavLink, Route, Routes } from 'react-router-dom';
 
 import { LibraryPage } from './pages/LibraryPage';
+import { OnlinePage } from './pages/OnlinePage';
+import { OnlineSessionPage } from './pages/OnlineSessionPage';
 import { PlayPage } from './pages/PlayPage';
 import { SettingsPage } from './pages/SettingsPage';
 
@@ -17,6 +19,7 @@ function App() {
           <NavLink to="/" end>
             Library
           </NavLink>
+          <NavLink to="/online">Online</NavLink>
           <NavLink to="/settings">Settings</NavLink>
         </nav>
       </header>
@@ -24,6 +27,8 @@ function App() {
       <main>
         <Routes>
           <Route path="/" element={<LibraryPage />} />
+          <Route path="/online" element={<OnlinePage />} />
+          <Route path="/online/session/:code" element={<OnlineSessionPage />} />
           <Route path="/play/:romId" element={<PlayPage />} />
           <Route path="/settings" element={<SettingsPage />} />
         </Routes>

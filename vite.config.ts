@@ -3,6 +3,18 @@ import react from '@vitejs/plugin-react';
 
 export default defineConfig({
   plugins: [react()],
+  server: {
+    proxy: {
+      '/api/multiplayer': {
+        target: 'http://127.0.0.1:8787',
+        changeOrigin: true,
+      },
+      '/ws/multiplayer': {
+        target: 'ws://127.0.0.1:8787',
+        ws: true,
+      },
+    },
+  },
   worker: {
     format: 'es',
   },

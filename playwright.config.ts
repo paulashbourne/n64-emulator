@@ -17,10 +17,18 @@ export default defineConfig({
   },
   webServer: fixedBaseUrl
     ? undefined
-    : {
-        command: 'npm run dev -- --host 127.0.0.1 --port 5173 --strictPort',
-        url: baseUrl,
-        reuseExistingServer: true,
-        timeout: 120_000,
-      },
+    : [
+        {
+          command: 'npm run dev:multiplayer',
+          url: 'http://127.0.0.1:8787/health',
+          reuseExistingServer: true,
+          timeout: 120_000,
+        },
+        {
+          command: 'npm run dev -- --host 127.0.0.1 --port 5173 --strictPort',
+          url: baseUrl,
+          reuseExistingServer: true,
+          timeout: 120_000,
+        },
+      ],
 });
