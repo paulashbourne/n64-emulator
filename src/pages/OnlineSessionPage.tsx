@@ -1,12 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 
+import { ControllerWizard } from '../components/ControllerWizard';
+import { VirtualController } from '../components/VirtualController';
 import { closeOnlineSession, getOnlineSession, kickOnlineMember, multiplayerSocketUrl } from '../online/multiplayerApi';
-import {
-  JOINER_KEY_TO_CONTROL,
-  buildDigitalInputPayload,
-  getPressedControlsFromGamepad,
-} from '../online/joinerInput';
+import { buildDigitalInputPayload } from '../online/joinerInput';
 import { describeRemoteInputPayload, parseRemoteInputPayload } from '../online/remoteInputBridge';
 import {
   buildInviteJoinUrl,
@@ -14,14 +12,16 @@ import {
   buildSessionPlayUrl,
   buildSessionRoute,
 } from '../online/sessionLinks';
+import { createInputPoller } from '../input/inputService';
 import { useAppStore } from '../state/appStore';
 import type {
+  MultiplayerDigitalInputPayload,
   MultiplayerMember,
   MultiplayerInputPayload,
   MultiplayerSessionSnapshot,
   MultiplayerSocketMessage,
 } from '../types/multiplayer';
-import type { N64ControlTarget } from '../types/input';
+import type { ControllerProfile, N64ControlTarget, N64DigitalTarget } from '../types/input';
 import type { RomRecord } from '../types/rom';
 
 const REMOTE_LOG_LIMIT = 40;
@@ -30,6 +30,41 @@ const SOCKET_HEARTBEAT_INTERVAL_MS = 10_000;
 const CHAT_MAX_LENGTH = 280;
 const SESSION_CLOSE_REASON_DEFAULT = 'Session closed.';
 const NO_ROOM_ROM = '__none__';
+const WEBRTC_CONFIGURATION: RTCConfiguration = {
+  iceServers: [
+    {
+      urls: ['stun:stun.l.google.com:19302'],
+    },
+  ],
+};
+
+type HostStreamStatus = 'idle' | 'connecting' | 'live' | 'error';
+type WizardMode = 'create' | 'edit';
+
+const DIGITAL_TARGETS: N64DigitalTarget[] = [
+  'a',
+  'b',
+  'z',
+  'start',
+  'l',
+  'r',
+  'dpad_up',
+  'dpad_down',
+  'dpad_left',
+  'dpad_right',
+  'c_up',
+  'c_down',
+  'c_left',
+  'c_right',
+];
+
+const REMOTE_TARGETS: N64ControlTarget[] = [
+  ...DIGITAL_TARGETS,
+  'analog_left',
+  'analog_right',
+  'analog_up',
+  'analog_down',
+];
 
 interface RemoteInputEvent {
   fromName: string;
@@ -110,6 +145,24 @@ function sendInputPayload(socket: WebSocket | null, payload: MultiplayerInputPay
   );
 }
 
+function sendWebRtcSignal(
+  socket: WebSocket | null,
+  targetClientId: string,
+  payload: { kind: 'offer' | 'answer'; sdp: string } | { kind: 'ice_candidate'; candidate: RTCIceCandidateInit },
+): void {
+  if (!socket || socket.readyState !== WebSocket.OPEN) {
+    return;
+  }
+
+  socket.send(
+    JSON.stringify({
+      type: 'webrtc_signal',
+      targetClientId,
+      payload,
+    }),
+  );
+}
+
 export function OnlineSessionPage() {
   const { code } = useParams<{ code: string }>();
   const [searchParams] = useSearchParams();
@@ -117,14 +170,21 @@ export function OnlineSessionPage() {
   const roms = useAppStore((state) => state.roms);
   const loadingRoms = useAppStore((state) => state.loadingRoms);
   const refreshRoms = useAppStore((state) => state.refreshRoms);
+  const profiles = useAppStore((state) => state.profiles);
+  const activeProfileId = useAppStore((state) => state.activeProfileId);
+  const loadProfiles = useAppStore((state) => state.loadProfiles);
+  const saveProfile = useAppStore((state) => state.saveProfile);
+  const setActiveProfile = useAppStore((state) => state.setActiveProfile);
 
   const socketRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<number | null>(null);
   const heartbeatTimerRef = useRef<number | null>(null);
   const pendingPingSentAtRef = useRef<number | null>(null);
   const sessionClosedRef = useRef(false);
-  const pressedKeyBindingsRef = useRef(new Map<string, N64ControlTarget>());
-  const pressedGamepadControlsRef = useRef(new Set<N64ControlTarget>());
+  const remotePressedStateRef = useRef<Partial<Record<N64ControlTarget, boolean>>>({});
+  const guestPeerConnectionRef = useRef<RTCPeerConnection | null>(null);
+  const guestPendingIceCandidatesRef = useRef<RTCIceCandidateInit[]>([]);
+  const hostStreamVideoRef = useRef<HTMLVideoElement | null>(null);
   const [socketStatus, setSocketStatus] = useState<'connecting' | 'connected' | 'disconnected'>('connecting');
   const [session, setSession] = useState<MultiplayerSessionSnapshot>();
   const [error, setError] = useState<string>();
@@ -138,6 +198,15 @@ export function OnlineSessionPage() {
   const [kickingClientId, setKickingClientId] = useState<string>();
   const [hostRomSelectionId, setHostRomSelectionId] = useState(NO_ROOM_ROM);
   const [savingHostRomSelection, setSavingHostRomSelection] = useState(false);
+  const [hostStreamStatus, setHostStreamStatus] = useState<HostStreamStatus>('idle');
+  const [hostStreamMuted, setHostStreamMuted] = useState(true);
+  const [wizardOpen, setWizardOpen] = useState(false);
+  const [wizardMode, setWizardMode] = useState<WizardMode>('create');
+  const [showVirtualController, setShowVirtualController] = useState(() =>
+    typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+      ? window.matchMedia('(hover: none), (pointer: coarse)').matches
+      : false,
+  );
 
   const normalizedCode = (code ?? '').toUpperCase();
   const sessionContext =
@@ -153,6 +222,10 @@ export function OnlineSessionPage() {
 
   const currentMember = session?.members.find((member) => member.clientId === clientId);
   const isHost = currentMember?.isHost ?? false;
+  const activeProfile = useMemo<ControllerProfile | undefined>(
+    () => profiles.find((profile) => profile.profileId === activeProfileId),
+    [activeProfileId, profiles],
+  );
 
   const membersBySlot = useMemo(() => {
     const map = new Map<number, MultiplayerMember>();
@@ -174,6 +247,147 @@ export function OnlineSessionPage() {
   const canSendRealtimeInput = socketStatus === 'connected' && !sessionClosedReason;
   const selectedHostRom: RomRecord | undefined =
     hostRomSelectionId === NO_ROOM_ROM ? undefined : roms.find((rom) => rom.id === hostRomSelectionId);
+  const hostStreamStatusText =
+    hostStreamStatus === 'live'
+      ? 'Live host stream connected.'
+      : hostStreamStatus === 'connecting'
+        ? 'Connecting to host stream…'
+        : hostStreamStatus === 'error'
+          ? 'Host stream connection failed. Waiting for a new stream offer.'
+          : 'Waiting for host to launch a game stream.';
+
+  const clearGuestPeerConnection = useCallback((): void => {
+    const peer = guestPeerConnectionRef.current;
+    if (peer) {
+      peer.onicecandidate = null;
+      peer.ontrack = null;
+      peer.onconnectionstatechange = null;
+      peer.close();
+      guestPeerConnectionRef.current = null;
+    }
+
+    guestPendingIceCandidatesRef.current = [];
+
+    const video = hostStreamVideoRef.current;
+    if (video) {
+      video.srcObject = null;
+    }
+  }, []);
+
+  const ensureGuestPeerConnection = useCallback((hostClientId: string): RTCPeerConnection => {
+    const existing = guestPeerConnectionRef.current;
+    if (existing) {
+      return existing;
+    }
+
+    const connection = new RTCPeerConnection(WEBRTC_CONFIGURATION);
+    connection.onicecandidate = (event) => {
+      if (!event.candidate) {
+        return;
+      }
+      sendWebRtcSignal(socketRef.current, hostClientId, {
+        kind: 'ice_candidate',
+        candidate: event.candidate.toJSON(),
+      });
+    };
+    connection.ontrack = (event) => {
+      const [stream] = event.streams;
+      if (!stream) {
+        return;
+      }
+
+      const video = hostStreamVideoRef.current;
+      if (video && video.srcObject !== stream) {
+        video.srcObject = stream;
+        void video.play().catch(() => {
+          // Autoplay can be blocked on some browsers until interaction.
+        });
+      }
+      setHostStreamStatus('live');
+    };
+    connection.onconnectionstatechange = () => {
+      if (connection.connectionState === 'failed' || connection.connectionState === 'disconnected') {
+        setHostStreamStatus('error');
+        clearGuestPeerConnection();
+      }
+      if (connection.connectionState === 'closed') {
+        setHostStreamStatus('idle');
+      }
+    };
+
+    guestPeerConnectionRef.current = connection;
+    return connection;
+  }, [clearGuestPeerConnection]);
+
+  const flushPendingGuestIceCandidates = useCallback((connection: RTCPeerConnection): void => {
+    if (guestPendingIceCandidatesRef.current.length === 0) {
+      return;
+    }
+
+    const queued = [...guestPendingIceCandidatesRef.current];
+    guestPendingIceCandidatesRef.current = [];
+    for (const candidate of queued) {
+      void connection.addIceCandidate(candidate).catch(() => {
+        // Ignore individual candidate failures to keep stream negotiation alive.
+      });
+    }
+  }, []);
+
+  const handleGuestWebRtcSignal = useCallback((
+    message: Extract<MultiplayerSocketMessage, { type: 'webrtc_signal' }>,
+  ): void => {
+    if (isHost) {
+      return;
+    }
+
+    if (message.payload.kind === 'offer') {
+      const hostClientId = message.fromClientId;
+      const offerSdp = message.payload.sdp;
+      const peer = ensureGuestPeerConnection(hostClientId);
+      setHostStreamStatus('connecting');
+
+      void (async () => {
+        try {
+          await peer.setRemoteDescription({
+            type: 'offer',
+            sdp: offerSdp,
+          });
+          flushPendingGuestIceCandidates(peer);
+          const answer = await peer.createAnswer();
+          await peer.setLocalDescription(answer);
+          const localDescription = peer.localDescription;
+          if (!localDescription?.sdp) {
+            throw new Error('Missing local SDP answer.');
+          }
+          sendWebRtcSignal(socketRef.current, hostClientId, {
+            kind: 'answer',
+            sdp: localDescription.sdp,
+          });
+        } catch {
+          setHostStreamStatus('error');
+          clearGuestPeerConnection();
+        }
+      })();
+      return;
+    }
+
+    if (message.payload.kind === 'ice_candidate') {
+      const candidate = message.payload.candidate;
+      const peer = guestPeerConnectionRef.current;
+      if (!peer || !peer.remoteDescription) {
+        guestPendingIceCandidatesRef.current.push(candidate);
+        return;
+      }
+
+      void peer.addIceCandidate(candidate).catch(() => {
+        // Ignore invalid candidate fragments.
+      });
+    }
+  }, [clearGuestPeerConnection, ensureGuestPeerConnection, flushPendingGuestIceCandidates, isHost]);
+
+  useEffect(() => {
+    void loadProfiles();
+  }, [loadProfiles]);
 
   useEffect(() => {
     if (!isHost) {
@@ -185,6 +399,14 @@ export function OnlineSessionPage() {
   useEffect(() => {
     setHostRomSelectionId(session?.romId ?? NO_ROOM_ROM);
   }, [session?.romId]);
+
+  useEffect(() => {
+    if (!isHost) {
+      return;
+    }
+    setHostStreamStatus('idle');
+    clearGuestPeerConnection();
+  }, [clearGuestPeerConnection, isHost]);
 
   useEffect(() => {
     if (!normalizedCode) {
@@ -303,6 +525,11 @@ export function OnlineSessionPage() {
           return;
         }
 
+        if (message.type === 'webrtc_signal') {
+          handleGuestWebRtcSignal(message);
+          return;
+        }
+
         if (message.type === 'remote_input') {
           const parsedPayload = parseRemoteInputPayload(message.payload);
           setRemoteInputs((current) => [
@@ -336,6 +563,8 @@ export function OnlineSessionPage() {
         if (message.type === 'session_closed') {
           sessionClosedRef.current = true;
           setSessionClosedReason(message.reason || SESSION_CLOSE_REASON_DEFAULT);
+          setHostStreamStatus('idle');
+          clearGuestPeerConnection();
           clearReconnectTimer();
           clearHeartbeatTimer();
           setSocketStatus('disconnected');
@@ -346,6 +575,8 @@ export function OnlineSessionPage() {
         if (message.type === 'kicked') {
           sessionClosedRef.current = true;
           setSessionClosedReason(message.reason || 'You were removed by host.');
+          setHostStreamStatus('idle');
+          clearGuestPeerConnection();
           clearReconnectTimer();
           clearHeartbeatTimer();
           setSocketStatus('disconnected');
@@ -360,6 +591,8 @@ export function OnlineSessionPage() {
         }
 
         setSocketStatus('disconnected');
+        setHostStreamStatus('idle');
+        clearGuestPeerConnection();
         if (sessionClosedRef.current) {
           return;
         }
@@ -379,6 +612,7 @@ export function OnlineSessionPage() {
 
     return () => {
       cancelled = true;
+      clearGuestPeerConnection();
       clearReconnectTimer();
       clearHeartbeatTimer();
       const socket = socketRef.current;
@@ -387,135 +621,76 @@ export function OnlineSessionPage() {
         socketRef.current = null;
       }
     };
-  }, [normalizedCode, clientId]);
+  }, [clearGuestPeerConnection, clientId, handleGuestWebRtcSignal, normalizedCode]);
+
+  const emitRemoteDigitalControl = useCallback((payload: MultiplayerDigitalInputPayload): void => {
+    if (!canSendRealtimeInput || isHost) {
+      return;
+    }
+    sendInputPayload(socketRef.current, payload);
+  }, [canSendRealtimeInput, isHost]);
+
+  const emitRemoteControlState = useCallback((control: N64ControlTarget, pressed: boolean): void => {
+    emitRemoteDigitalControl(buildDigitalInputPayload(control, pressed));
+  }, [emitRemoteDigitalControl]);
 
   const sendQuickTap = (control: N64ControlTarget): void => {
-    if (!canSendRealtimeInput) {
+    if (!canSendRealtimeInput || isHost) {
       return;
     }
 
-    sendInputPayload(socketRef.current, buildDigitalInputPayload(control, true));
+    emitRemoteControlState(control, true);
 
     window.setTimeout(() => {
-      sendInputPayload(socketRef.current, buildDigitalInputPayload(control, false));
+      emitRemoteControlState(control, false);
     }, 80);
   };
 
+  const onVirtualControlChange = (control: N64ControlTarget, pressed: boolean): void => {
+    emitRemoteControlState(control, pressed);
+  };
+
   useEffect(() => {
-    if (isHost || !canSendRealtimeInput) {
+    if (isHost || !canSendRealtimeInput || !activeProfile) {
       return;
     }
 
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.repeat) {
-        return;
+    const poller = createInputPoller(activeProfile, (inputState) => {
+      const nextPressedState: Partial<Record<N64ControlTarget, boolean>> = {};
+      for (const control of DIGITAL_TARGETS) {
+        nextPressedState[control] = inputState.buttons[control];
+      }
+      nextPressedState.analog_left = inputState.stick.x <= -0.55;
+      nextPressedState.analog_right = inputState.stick.x >= 0.55;
+      nextPressedState.analog_up = inputState.stick.y >= 0.55;
+      nextPressedState.analog_down = inputState.stick.y <= -0.55;
+
+      const previousPressedState = remotePressedStateRef.current;
+      for (const control of REMOTE_TARGETS) {
+        const nextPressed = Boolean(nextPressedState[control]);
+        const previousPressed = Boolean(previousPressedState[control]);
+        if (nextPressed === previousPressed) {
+          continue;
+        }
+        emitRemoteControlState(control, nextPressed);
       }
 
-      const target = event.target;
-      if (
-        target instanceof HTMLInputElement ||
-        target instanceof HTMLTextAreaElement ||
-        target instanceof HTMLSelectElement
-      ) {
-        return;
-      }
-
-      const control = JOINER_KEY_TO_CONTROL[event.code];
-      if (!control) {
-        return;
-      }
-
-      event.preventDefault();
-      if (pressedKeyBindingsRef.current.has(event.code)) {
-        return;
-      }
-
-      pressedKeyBindingsRef.current.set(event.code, control);
-      sendInputPayload(socketRef.current, buildDigitalInputPayload(control, true));
-    };
-
-    const onKeyUp = (event: KeyboardEvent): void => {
-      const control = pressedKeyBindingsRef.current.get(event.code) ?? JOINER_KEY_TO_CONTROL[event.code];
-      if (!control) {
-        return;
-      }
-
-      event.preventDefault();
-      pressedKeyBindingsRef.current.delete(event.code);
-      sendInputPayload(socketRef.current, buildDigitalInputPayload(control, false));
-    };
-
-    const releaseAllPressedKeys = (): void => {
-      for (const [keyCode, control] of pressedKeyBindingsRef.current.entries()) {
-        pressedKeyBindingsRef.current.delete(keyCode);
-        sendInputPayload(socketRef.current, buildDigitalInputPayload(control, false));
-      }
-    };
-
-    window.addEventListener('keydown', onKeyDown);
-    window.addEventListener('keyup', onKeyUp);
-    window.addEventListener('blur', releaseAllPressedKeys);
-
-    return () => {
-      window.removeEventListener('keydown', onKeyDown);
-      window.removeEventListener('keyup', onKeyUp);
-      window.removeEventListener('blur', releaseAllPressedKeys);
-      releaseAllPressedKeys();
-    };
-  }, [isHost, canSendRealtimeInput]);
-
-  useEffect(() => {
-    if (isHost || !canSendRealtimeInput) {
-      return;
-    }
-
-    let rafHandle = 0;
-    let cancelled = false;
-
-    const releaseAllPressedGamepadControls = (): void => {
-      for (const control of pressedGamepadControlsRef.current) {
-        sendInputPayload(socketRef.current, buildDigitalInputPayload(control, false));
-      }
-      pressedGamepadControlsRef.current = new Set<N64ControlTarget>();
-    };
-
-    const poll = (): void => {
-      if (cancelled) {
-        return;
-      }
-
+      remotePressedStateRef.current = nextPressedState;
       const gamepads = navigator.getGamepads?.() ?? [];
-      const activeGamepad = gamepads.find((pad): pad is Gamepad => Boolean(pad)) ?? null;
-      setGamepadConnected(Boolean(activeGamepad));
-
-      const nextPressed = getPressedControlsFromGamepad(activeGamepad);
-      const previousPressed = pressedGamepadControlsRef.current;
-
-      for (const control of nextPressed) {
-        if (!previousPressed.has(control)) {
-          sendInputPayload(socketRef.current, buildDigitalInputPayload(control, true));
-        }
-      }
-
-      for (const control of previousPressed) {
-        if (!nextPressed.has(control)) {
-          sendInputPayload(socketRef.current, buildDigitalInputPayload(control, false));
-        }
-      }
-
-      pressedGamepadControlsRef.current = nextPressed;
-      rafHandle = window.requestAnimationFrame(poll);
-    };
-
-    rafHandle = window.requestAnimationFrame(poll);
+      setGamepadConnected(gamepads.some((pad) => Boolean(pad)));
+    });
 
     return () => {
-      cancelled = true;
-      window.cancelAnimationFrame(rafHandle);
-      releaseAllPressedGamepadControls();
+      poller.stop();
+      for (const control of REMOTE_TARGETS) {
+        if (remotePressedStateRef.current[control]) {
+          emitRemoteControlState(control, false);
+        }
+      }
+      remotePressedStateRef.current = {};
       setGamepadConnected(false);
     };
-  }, [isHost, canSendRealtimeInput]);
+  }, [activeProfile, canSendRealtimeInput, emitRemoteControlState, isHost]);
 
   const setClipboardFeedback = (message: string): void => {
     setClipboardMessage(message);
@@ -602,6 +777,28 @@ export function OnlineSessionPage() {
     setClipboardFeedback(nextRom ? `Room ROM set to "${nextRom.title}".` : 'Room ROM cleared.');
   };
 
+  const openCreateWizard = (): void => {
+    setWizardMode('create');
+    setWizardOpen(true);
+  };
+
+  const openEditWizard = (): void => {
+    if (!activeProfile) {
+      openCreateWizard();
+      return;
+    }
+    setWizardMode('edit');
+    setWizardOpen(true);
+  };
+
+  const onProfileComplete = async (profile: ControllerProfile): Promise<void> => {
+    await saveProfile(profile);
+    setActiveProfile(profile.profileId);
+    setWizardOpen(false);
+    setWizardMode('create');
+    setClipboardFeedback(`Saved controller profile "${profile.name}".`);
+  };
+
   const onEndSession = async (): Promise<void> => {
     if (!isHost || !normalizedCode || !clientId) {
       return;
@@ -680,7 +877,9 @@ export function OnlineSessionPage() {
   }
 
   return (
-    <section className="online-session-page">
+    <section
+      className={`online-session-page ${!isHost && showVirtualController ? 'online-session-has-virtual-controller' : ''}`}
+    >
       <header className="panel">
         <h1>Online Session {normalizedCode}</h1>
         <div className="session-status-row">
@@ -818,8 +1017,59 @@ export function OnlineSessionPage() {
         </section>
       ) : (
         <section className="panel">
-          <h2>Send Controller Input</h2>
-          <p>Use keyboard, gamepad, or quick taps to drive the host emulator in real time.</p>
+          <h2>Host Stream</h2>
+          <p className="online-subtle">{hostStreamStatusText}</p>
+          <div className="host-stream-shell">
+            <video
+              ref={hostStreamVideoRef}
+              className="host-stream-video"
+              autoPlay
+              playsInline
+              muted={hostStreamMuted}
+              controls={false}
+            />
+          </div>
+          <div className="wizard-actions">
+            <button
+              type="button"
+              onClick={() => setHostStreamMuted((value) => !value)}
+              disabled={hostStreamStatus !== 'live'}
+            >
+              {hostStreamMuted ? 'Unmute Stream' : 'Mute Stream'}
+            </button>
+          </div>
+
+          <h3>Controller Profile</h3>
+          {profiles.length > 0 ? (
+            <label>
+              Active profile
+              <select value={activeProfileId ?? ''} onChange={(event) => setActiveProfile(event.target.value || undefined)}>
+                <option value="">None</option>
+                {profiles.map((profile) => (
+                  <option key={profile.profileId} value={profile.profileId}>
+                    {profile.name}
+                    {profile.romHash ? ' (ROM-specific)' : ' (Global)'}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : (
+            <p className="online-subtle">No controller profiles yet.</p>
+          )}
+          <div className="wizard-actions">
+            <button type="button" onClick={openCreateWizard}>
+              New Profile
+            </button>
+            <button type="button" onClick={openEditWizard} disabled={!activeProfile}>
+              Edit Active
+            </button>
+            <button type="button" onClick={() => setShowVirtualController((value) => !value)}>
+              {showVirtualController ? 'Hide Virtual Controller' : 'Show Virtual Controller'}
+            </button>
+          </div>
+
+          <h3>Send Controller Input</h3>
+          <p>Use your active profile, quick taps, or virtual controller to drive the host emulator in real time.</p>
           <p className="online-subtle">
             Keyboard: <code>X</code> A, <code>C</code> B, <code>Z</code> Z, <code>Enter</code> Start, arrows D-Pad,
             <code> Q/E</code> L/R, <code>I/J/K/L</code> C-buttons.
@@ -886,6 +1136,25 @@ export function OnlineSessionPage() {
           {chatDraft.trim().length}/{CHAT_MAX_LENGTH} characters
         </p>
       </section>
+
+      {wizardOpen ? (
+        <div className="modal-backdrop" role="dialog" aria-modal="true">
+          <ControllerWizard
+            initialProfile={wizardMode === 'edit' ? activeProfile : undefined}
+            onCancel={() => {
+              setWizardOpen(false);
+              setWizardMode('create');
+            }}
+            onComplete={onProfileComplete}
+          />
+        </div>
+      ) : null}
+
+      {!isHost && showVirtualController ? (
+        <div className="virtual-controller-dock online-session-virtual-controller-dock">
+          <VirtualController disabled={!canSendRealtimeInput} onControlChange={onVirtualControlChange} />
+        </div>
+      ) : null}
     </section>
   );
 }

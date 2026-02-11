@@ -54,6 +54,20 @@ export interface MultiplayerDigitalInputPayload {
 
 export type MultiplayerInputPayload = MultiplayerDigitalInputPayload;
 
+export type MultiplayerWebRtcSignalPayload =
+  | {
+      kind: 'offer';
+      sdp: string;
+    }
+  | {
+      kind: 'answer';
+      sdp: string;
+    }
+  | {
+      kind: 'ice_candidate';
+      candidate: RTCIceCandidateInit;
+    };
+
 export interface MultiplayerChatEntry {
   id: string;
   fromClientId: string;
@@ -85,6 +99,14 @@ export type MultiplayerSocketMessage =
   | {
       type: 'chat';
       entry: MultiplayerChatEntry;
+    }
+  | {
+      type: 'webrtc_signal';
+      fromClientId: string;
+      fromName: string;
+      fromSlot: number;
+      payload: MultiplayerWebRtcSignalPayload;
+      at: number;
     }
   | {
       type: 'session_closed';

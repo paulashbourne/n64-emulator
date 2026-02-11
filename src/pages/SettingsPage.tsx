@@ -1,22 +1,30 @@
 import { useEffect, useState } from 'react';
 
+import { ControllerWizard } from '../components/ControllerWizard';
 import type { EmulatorBootMode } from '../emulator/emulatorJsRuntime';
 import { clearIndexedData } from '../storage/db';
 import { getPreferredBootMode, setPreferredBootMode } from '../storage/appSettings';
 import { useAppStore } from '../state/appStore';
+import type { ControllerProfile } from '../types/input';
 
 const DEFAULT_KEYBOARD_PROFILE_ID = 'profile:keyboard-default';
+type WizardMode = 'create' | 'edit';
 
 export function SettingsPage() {
   const profiles = useAppStore((state) => state.profiles);
+  const activeProfileId = useAppStore((state) => state.activeProfileId);
   const loadProfiles = useAppStore((state) => state.loadProfiles);
+  const saveProfile = useAppStore((state) => state.saveProfile);
   const removeProfile = useAppStore((state) => state.removeProfile);
+  const setActiveProfile = useAppStore((state) => state.setActiveProfile);
   const refreshRoms = useAppStore((state) => state.refreshRoms);
 
   const [working, setWorking] = useState(false);
   const [savingBootMode, setSavingBootMode] = useState(false);
   const [bootMode, setBootMode] = useState<EmulatorBootMode>('auto');
   const [message, setMessage] = useState<string>();
+  const [wizardOpen, setWizardOpen] = useState(false);
+  const [wizardMode, setWizardMode] = useState<WizardMode>('create');
 
   useEffect(() => {
     void loadProfiles();
@@ -35,6 +43,8 @@ export function SettingsPage() {
       cancelled = true;
     };
   }, []);
+
+  const activeProfile = profiles.find((profile) => profile.profileId === activeProfileId);
 
   const onDeleteProfile = async (profileId: string): Promise<void> => {
     setWorking(true);
@@ -78,6 +88,30 @@ export function SettingsPage() {
     }
   };
 
+  const openCreateWizard = (): void => {
+    setWizardMode('create');
+    setWizardOpen(true);
+  };
+
+  const openEditWizard = (profileId?: string): void => {
+    if (!profileId) {
+      openCreateWizard();
+      return;
+    }
+
+    setActiveProfile(profileId);
+    setWizardMode('edit');
+    setWizardOpen(true);
+  };
+
+  const onProfileComplete = async (profile: ControllerProfile): Promise<void> => {
+    await saveProfile(profile);
+    setActiveProfile(profile.profileId);
+    setWizardOpen(false);
+    setWizardMode('create');
+    setMessage(`Saved controller profile "${profile.name}".`);
+  };
+
   return (
     <section className="settings-page">
       <header className="panel">
@@ -88,6 +122,32 @@ export function SettingsPage() {
 
       <section className="panel">
         <h2>Controller Profiles</h2>
+        <div className="wizard-actions">
+          <button type="button" onClick={openCreateWizard} disabled={working}>
+            Create Profile
+          </button>
+          <button type="button" onClick={() => openEditWizard(activeProfileId)} disabled={working || !activeProfile}>
+            Edit Active
+          </button>
+        </div>
+        {profiles.length > 0 ? (
+          <label>
+            Active profile
+            <select
+              value={activeProfileId ?? ''}
+              onChange={(event) => setActiveProfile(event.target.value || undefined)}
+              disabled={working}
+            >
+              <option value="">None</option>
+              {profiles.map((profile) => (
+                <option key={profile.profileId} value={profile.profileId}>
+                  {profile.name}
+                  {profile.romHash ? ' (ROM-specific)' : ' (Global)'}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : null}
         {profiles.length === 0 ? <p>No controller profiles stored.</p> : null}
         <ul className="profile-list">
           {profiles.map((profile) => (
@@ -103,18 +163,23 @@ export function SettingsPage() {
                   {profile.profileId === DEFAULT_KEYBOARD_PROFILE_ID ? ' • Recommended baseline profile' : ''}
                 </p>
               </div>
-              <button
-                type="button"
-                onClick={() => void onDeleteProfile(profile.profileId)}
-                disabled={working || profile.profileId === DEFAULT_KEYBOARD_PROFILE_ID}
-                title={
-                  profile.profileId === DEFAULT_KEYBOARD_PROFILE_ID
-                    ? 'Default keyboard profile is always available.'
-                    : undefined
-                }
-              >
-                Delete
-              </button>
+              <div className="wizard-actions">
+                <button type="button" onClick={() => openEditWizard(profile.profileId)} disabled={working}>
+                  Edit
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void onDeleteProfile(profile.profileId)}
+                  disabled={working || profile.profileId === DEFAULT_KEYBOARD_PROFILE_ID}
+                  title={
+                    profile.profileId === DEFAULT_KEYBOARD_PROFILE_ID
+                      ? 'Default keyboard profile is always available.'
+                      : undefined
+                  }
+                >
+                  Delete
+                </button>
+              </div>
             </li>
           ))}
         </ul>
@@ -144,6 +209,19 @@ export function SettingsPage() {
           {working ? 'Working…' : 'Clear All Local Data'}
         </button>
       </section>
+
+      {wizardOpen ? (
+        <div className="modal-backdrop" role="dialog" aria-modal="true">
+          <ControllerWizard
+            initialProfile={wizardMode === 'edit' ? activeProfile : undefined}
+            onCancel={() => {
+              setWizardOpen(false);
+              setWizardMode('create');
+            }}
+            onComplete={onProfileComplete}
+          />
+        </div>
+      ) : null}
     </section>
   );
 }

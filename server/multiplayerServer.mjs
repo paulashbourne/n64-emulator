@@ -91,6 +91,53 @@ function sanitizeChatMessage(value) {
   return value.replace(/\s+/g, ' ').trim().slice(0, 280);
 }
 
+function sanitizeWebRtcSignalPayload(payload) {
+  if (!payload || typeof payload !== 'object' || typeof payload.kind !== 'string') {
+    return null;
+  }
+
+  if (payload.kind === 'offer' || payload.kind === 'answer') {
+    if (typeof payload.sdp !== 'string') {
+      return null;
+    }
+    const sdp = payload.sdp.slice(0, 200_000);
+    if (!sdp) {
+      return null;
+    }
+    return {
+      kind: payload.kind,
+      sdp,
+    };
+  }
+
+  if (payload.kind === 'ice_candidate') {
+    const candidateInput = payload.candidate;
+    if (!candidateInput || typeof candidateInput !== 'object') {
+      return null;
+    }
+
+    const candidateValue = candidateInput.candidate;
+    if (typeof candidateValue !== 'string') {
+      return null;
+    }
+
+    return {
+      kind: 'ice_candidate',
+      candidate: {
+        candidate: candidateValue.slice(0, 10_000),
+        sdpMid: typeof candidateInput.sdpMid === 'string' ? candidateInput.sdpMid : null,
+        sdpMLineIndex: Number.isInteger(candidateInput.sdpMLineIndex) ? candidateInput.sdpMLineIndex : null,
+        usernameFragment:
+          typeof candidateInput.usernameFragment === 'string'
+            ? candidateInput.usernameFragment.slice(0, 256)
+            : undefined,
+      },
+    };
+  }
+
+  return null;
+}
+
 function generateInviteCode() {
   let code = '';
   for (let index = 0; index < INVITE_CODE_LENGTH; index += 1) {
@@ -249,6 +296,39 @@ function handleWsMessage(session, member, rawMessage) {
     }
 
     broadcastChatEntry(session, entry);
+    return;
+  }
+
+  if (message.type === 'webrtc_signal') {
+    if (typeof message.targetClientId !== 'string') {
+      return;
+    }
+
+    const target = session.members.get(message.targetClientId);
+    if (!target || !target.socket || target.socket.readyState !== target.socket.OPEN) {
+      return;
+    }
+
+    // Keep peer topology host<->guest only.
+    if (member.isHost === target.isHost) {
+      return;
+    }
+
+    const payload = sanitizeWebRtcSignalPayload(message.payload);
+    if (!payload) {
+      return;
+    }
+
+    target.socket.send(
+      JSON.stringify({
+        type: 'webrtc_signal',
+        fromClientId: member.clientId,
+        fromName: member.name,
+        fromSlot: member.slot,
+        payload,
+        at: Date.now(),
+      }),
+    );
   }
 }
 

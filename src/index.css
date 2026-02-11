@@ -476,6 +476,10 @@ label {
   margin-top: 0;
 }
 
+.play-has-virtual-controller .play-stage {
+  padding-bottom: 15.2rem;
+}
+
 .modal-backdrop {
   position: fixed;
   inset: 0;
@@ -679,6 +683,82 @@ label {
   margin: 0;
 }
 
+.virtual-controller-dock {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 115;
+  padding: 0.65rem;
+  padding-bottom: calc(0.65rem + env(safe-area-inset-bottom));
+  background: linear-gradient(180deg, rgba(4, 8, 14, 0.2), rgba(4, 8, 14, 0.88));
+  backdrop-filter: blur(6px);
+}
+
+.virtual-controller-inline {
+  margin-top: 0.8rem;
+}
+
+.online-session-has-virtual-controller {
+  padding-bottom: 15rem;
+}
+
+.online-session-virtual-controller-dock {
+  z-index: 140;
+}
+
+.virtual-controller {
+  width: min(920px, 100%);
+  margin: 0 auto;
+  border: 1px solid var(--border);
+  border-radius: 0.95rem;
+  background: rgba(8, 12, 20, 0.9);
+  box-shadow: 0 14px 28px rgba(0, 0, 0, 0.3);
+  padding: 0.65rem;
+  display: grid;
+  gap: 0.62rem;
+}
+
+.vc-shoulders {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.48rem;
+}
+
+.vc-main {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.55rem;
+}
+
+.vc-cluster {
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 0.7rem;
+  padding: 0.45rem;
+  display: grid;
+  gap: 0.45rem;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.vc-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.4rem;
+}
+
+.vc-button {
+  min-height: 2.2rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  border-radius: 0.68rem;
+}
+
+.vc-button.active {
+  border-color: rgba(255, 159, 28, 0.8);
+  background: linear-gradient(180deg, rgba(255, 159, 28, 0.38), rgba(255, 159, 28, 0.2));
+  color: #fff2db;
+}
+
 .room-player-list,
 .remote-input-list {
   list-style: none;
@@ -714,6 +794,21 @@ label {
 
 .remote-input-up {
   border-color: rgba(255, 159, 28, 0.45);
+}
+
+.host-stream-shell {
+  margin-top: 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 0.8rem;
+  overflow: hidden;
+  background: #050913;
+}
+
+.host-stream-video {
+  display: block;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  background: #03060d;
 }
 
 .online-input-grid {
@@ -766,6 +861,10 @@ label {
 
   .online-page-grid {
     grid-template-columns: 1fr;
+  }
+
+  .vc-main {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
@@ -835,6 +934,29 @@ label {
 
   .play-side-menu {
     width: min(100vw, 100%);
+  }
+
+  .play-has-virtual-controller .play-stage {
+    padding-bottom: 16.8rem;
+  }
+
+  .virtual-controller-dock {
+    padding: 0.45rem;
+    padding-bottom: calc(0.45rem + env(safe-area-inset-bottom));
+  }
+
+  .virtual-controller {
+    padding: 0.5rem;
+    gap: 0.48rem;
+  }
+
+  .vc-main {
+    grid-template-columns: 1fr;
+  }
+
+  .vc-button {
+    min-height: 2.45rem;
+    font-size: 0.92rem;
   }
 }
 

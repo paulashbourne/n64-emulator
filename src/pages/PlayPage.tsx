@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { MutableRefObject } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 
 import { ControllerWizard } from '../components/ControllerWizard';
+import { VirtualController } from '../components/VirtualController';
 import { applyProfileToRunningEmulator, controllerProfileToEmulatorJsControls } from '../emulator/emulatorJsControls';
 import {
   clearEmulatorJsIndexedCaches,
@@ -10,6 +11,7 @@ import {
   stopEmulatorJs,
   type EmulatorBootMode,
 } from '../emulator/emulatorJsRuntime';
+import { N64_TARGET_TO_INPUT_INDEX } from '../emulator/n64InputMap';
 import { multiplayerSocketUrl } from '../online/multiplayerApi';
 import {
   applyRemoteInputPayloadToHost,
@@ -21,15 +23,33 @@ import { getRomArrayBuffer, getRomById } from '../roms/catalogService';
 import { normalizeRomByteOrder } from '../roms/scanner';
 import { getPreferredBootMode, setPreferredBootMode } from '../storage/appSettings';
 import { useAppStore } from '../state/appStore';
-import type { ControllerProfile } from '../types/input';
-import type { MultiplayerSocketMessage } from '../types/multiplayer';
+import type { ControllerProfile, N64ControlTarget } from '../types/input';
+import type {
+  MultiplayerSessionSnapshot,
+  MultiplayerSocketMessage,
+  MultiplayerWebRtcSignalPayload,
+} from '../types/multiplayer';
 import type { RomRecord } from '../types/rom';
 
 const PLAYER_SELECTOR = '#emulatorjs-player';
 const ONLINE_HEARTBEAT_INTERVAL_MS = 10_000;
+const ONLINE_STREAM_CAPTURE_FPS = 60;
+const ONLINE_STREAM_POLL_INTERVAL_MS = 700;
+const WEBRTC_CONFIGURATION: RTCConfiguration = {
+  iceServers: [
+    {
+      urls: ['stun:stun.l.google.com:19302'],
+    },
+  ],
+};
 
 type SessionStatus = 'loading' | 'running' | 'paused' | 'error';
 type WizardMode = 'create' | 'edit';
+
+interface HostStreamingPeerState {
+  connection: RTCPeerConnection;
+  negotiationInFlight: boolean;
+}
 
 function revokeRomBlobUrl(ref: MutableRefObject<string | null>): void {
   if (!ref.current) {
@@ -93,6 +113,8 @@ export function PlayPage() {
   const onlineHeartbeatTimerRef = useRef<number | null>(null);
   const onlinePendingPingSentAtRef = useRef<number | null>(null);
   const onlineSessionClosedRef = useRef(false);
+  const onlineHostStreamRef = useRef<MediaStream | null>(null);
+  const onlineHostPeersRef = useRef<Map<string, HostStreamingPeerState>>(new Map());
   const onlineRomDescriptorRef = useRef<{ romId?: string; romTitle?: string }>({
     romId: decodedRomId,
     romTitle: undefined,
@@ -106,6 +128,11 @@ export function PlayPage() {
   const [wizardOpen, setWizardOpen] = useState(false);
   const [wizardMode, setWizardMode] = useState<WizardMode>('create');
   const [menuOpen, setMenuOpen] = useState(false);
+  const [showVirtualController, setShowVirtualController] = useState(() =>
+    typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+      ? window.matchMedia('(hover: none), (pointer: coarse)').matches
+      : false,
+  );
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [bootMode, setBootMode] = useState<EmulatorBootMode>('auto');
   const [bootModeLoaded, setBootModeLoaded] = useState(false);
@@ -118,11 +145,272 @@ export function PlayPage() {
   const [onlineLastRemoteInput, setOnlineLastRemoteInput] = useState<string>();
   const [onlineConnectedMembers, setOnlineConnectedMembers] = useState(1);
   const [onlineLatencyMs, setOnlineLatencyMs] = useState<number>();
+  const [onlineSessionSnapshot, setOnlineSessionSnapshot] = useState<MultiplayerSessionSnapshot>();
+  const [onlineStreamPeers, setOnlineStreamPeers] = useState(0);
 
   const activeProfile = useMemo<ControllerProfile | undefined>(
     () => profiles.find((profile) => profile.profileId === activeProfileId),
     [profiles, activeProfileId],
   );
+  const isOnlineHost = onlineRelayEnabled && onlineSessionSnapshot?.hostClientId === onlineClientId;
+  const isOnlineHostRef = useRef(false);
+  const onlineSessionSnapshotRef = useRef<MultiplayerSessionSnapshot | undefined>(undefined);
+
+  useEffect(() => {
+    isOnlineHostRef.current = isOnlineHost;
+  }, [isOnlineHost]);
+
+  useEffect(() => {
+    onlineSessionSnapshotRef.current = onlineSessionSnapshot;
+  }, [onlineSessionSnapshot]);
+
+  const setOnlineStreamPeerCountFromMap = useCallback((): void => {
+    setOnlineStreamPeers(onlineHostPeersRef.current.size);
+  }, []);
+
+  const closeOnlineHostPeer = useCallback((clientId: string): void => {
+    const peerState = onlineHostPeersRef.current.get(clientId);
+    if (!peerState) {
+      return;
+    }
+
+    peerState.connection.onicecandidate = null;
+    peerState.connection.onconnectionstatechange = null;
+    peerState.connection.ontrack = null;
+    peerState.connection.close();
+    onlineHostPeersRef.current.delete(clientId);
+    setOnlineStreamPeerCountFromMap();
+  }, [setOnlineStreamPeerCountFromMap]);
+
+  const clearOnlineHostPeers = useCallback((): void => {
+    for (const clientId of Array.from(onlineHostPeersRef.current.keys())) {
+      closeOnlineHostPeer(clientId);
+    }
+    setOnlineStreamPeerCountFromMap();
+  }, [closeOnlineHostPeer, setOnlineStreamPeerCountFromMap]);
+
+  const stopOnlineHostStream = useCallback((): void => {
+    const stream = onlineHostStreamRef.current;
+    if (!stream) {
+      return;
+    }
+
+    stream.getTracks().forEach((track) => track.stop());
+    onlineHostStreamRef.current = null;
+  }, []);
+
+  const sendWebRtcSignal = useCallback((targetClientId: string, payload: MultiplayerWebRtcSignalPayload): void => {
+    const socket = onlineSocketRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    socket.send(
+      JSON.stringify({
+        type: 'webrtc_signal',
+        targetClientId,
+        payload,
+      }),
+    );
+  }, []);
+
+  const ensureHostPeerNegotiation = useCallback((targetClientId: string): void => {
+    const peerState = onlineHostPeersRef.current.get(targetClientId);
+    if (!peerState || peerState.negotiationInFlight) {
+      return;
+    }
+
+    peerState.negotiationInFlight = true;
+    void (async () => {
+      try {
+        const offer = await peerState.connection.createOffer();
+        await peerState.connection.setLocalDescription(offer);
+        const localDescription = peerState.connection.localDescription;
+        if (!localDescription?.sdp) {
+          return;
+        }
+        sendWebRtcSignal(targetClientId, {
+          kind: 'offer',
+          sdp: localDescription.sdp,
+        });
+      } catch {
+        closeOnlineHostPeer(targetClientId);
+      } finally {
+        const latest = onlineHostPeersRef.current.get(targetClientId);
+        if (latest) {
+          latest.negotiationInFlight = false;
+        }
+      }
+    })();
+  }, [closeOnlineHostPeer, sendWebRtcSignal]);
+
+  const createHostPeerConnection = useCallback((targetClientId: string): RTCPeerConnection => {
+    const connection = new RTCPeerConnection(WEBRTC_CONFIGURATION);
+    connection.onicecandidate = (event) => {
+      if (!event.candidate) {
+        return;
+      }
+      sendWebRtcSignal(targetClientId, {
+        kind: 'ice_candidate',
+        candidate: event.candidate.toJSON(),
+      });
+    };
+
+    connection.onconnectionstatechange = () => {
+      if (
+        connection.connectionState === 'failed' ||
+        connection.connectionState === 'closed' ||
+        connection.connectionState === 'disconnected'
+      ) {
+        closeOnlineHostPeer(targetClientId);
+      }
+    };
+
+    return connection;
+  }, [closeOnlineHostPeer, sendWebRtcSignal]);
+
+  const attachHostStreamToPeer = useCallback((connection: RTCPeerConnection): boolean => {
+    const stream = onlineHostStreamRef.current;
+    if (!stream) {
+      return false;
+    }
+
+    const existingTrackIds = new Set(
+      connection
+        .getSenders()
+        .map((sender) => sender.track?.id)
+        .filter((trackId): trackId is string => typeof trackId === 'string'),
+    );
+
+    for (const track of stream.getTracks()) {
+      if (!existingTrackIds.has(track.id)) {
+        connection.addTrack(track, stream);
+      }
+    }
+
+    return stream.getVideoTracks().length > 0;
+  }, []);
+
+  const syncHostStreamingPeers = useCallback((session: MultiplayerSessionSnapshot): void => {
+    if (!isOnlineHostRef.current) {
+      clearOnlineHostPeers();
+      return;
+    }
+
+    const connectedGuestMembers = session.members.filter(
+      (member) => !member.isHost && member.connected && member.clientId !== onlineClientId,
+    );
+    const targetIds = new Set(connectedGuestMembers.map((member) => member.clientId));
+
+    for (const existingClientId of Array.from(onlineHostPeersRef.current.keys())) {
+      if (!targetIds.has(existingClientId)) {
+        closeOnlineHostPeer(existingClientId);
+      }
+    }
+
+    for (const member of connectedGuestMembers) {
+      let peerState = onlineHostPeersRef.current.get(member.clientId);
+      if (!peerState) {
+        peerState = {
+          connection: createHostPeerConnection(member.clientId),
+          negotiationInFlight: false,
+        };
+        onlineHostPeersRef.current.set(member.clientId, peerState);
+      }
+
+      const hasVideoTrack = attachHostStreamToPeer(peerState.connection);
+      if (hasVideoTrack) {
+        ensureHostPeerNegotiation(member.clientId);
+      }
+    }
+
+    setOnlineStreamPeerCountFromMap();
+  }, [
+    attachHostStreamToPeer,
+    clearOnlineHostPeers,
+    closeOnlineHostPeer,
+    createHostPeerConnection,
+    ensureHostPeerNegotiation,
+    onlineClientId,
+    setOnlineStreamPeerCountFromMap,
+  ]);
+
+  const handleHostWebRtcSignal = useCallback((message: Extract<MultiplayerSocketMessage, { type: 'webrtc_signal' }>): void => {
+    if (!isOnlineHostRef.current) {
+      return;
+    }
+
+    const senderClientId = message.fromClientId;
+    let peerState = onlineHostPeersRef.current.get(senderClientId);
+    if (!peerState) {
+      const memberExists = onlineSessionSnapshotRef.current?.members.some(
+        (member) => member.clientId === senderClientId,
+      );
+      if (!memberExists) {
+        return;
+      }
+      peerState = {
+        connection: createHostPeerConnection(senderClientId),
+        negotiationInFlight: false,
+      };
+      onlineHostPeersRef.current.set(senderClientId, peerState);
+      attachHostStreamToPeer(peerState.connection);
+      setOnlineStreamPeerCountFromMap();
+    }
+
+    if (message.payload.kind === 'answer') {
+      void peerState.connection
+        .setRemoteDescription({
+          type: 'answer',
+          sdp: message.payload.sdp,
+        })
+        .catch(() => {
+          closeOnlineHostPeer(senderClientId);
+        });
+      return;
+    }
+
+    if (message.payload.kind === 'ice_candidate') {
+      void peerState.connection.addIceCandidate(message.payload.candidate).catch(() => {
+        closeOnlineHostPeer(senderClientId);
+      });
+    }
+  }, [
+    attachHostStreamToPeer,
+    closeOnlineHostPeer,
+    createHostPeerConnection,
+    setOnlineStreamPeerCountFromMap,
+  ]);
+
+  const tryStartHostStreamCapture = useCallback((): boolean => {
+    if (!isOnlineHostRef.current) {
+      return false;
+    }
+
+    const existingStream = onlineHostStreamRef.current;
+    if (existingStream?.getVideoTracks().some((track) => track.readyState === 'live')) {
+      return true;
+    }
+
+    const playerCanvas = document.querySelector(`${PLAYER_SELECTOR} canvas`);
+    if (!(playerCanvas instanceof HTMLCanvasElement) || typeof playerCanvas.captureStream !== 'function') {
+      return false;
+    }
+
+    const capturedStream = playerCanvas.captureStream(ONLINE_STREAM_CAPTURE_FPS);
+    const videoTrack = capturedStream.getVideoTracks()[0];
+    if (!videoTrack) {
+      capturedStream.getTracks().forEach((track) => track.stop());
+      return false;
+    }
+
+    stopOnlineHostStream();
+    onlineHostStreamRef.current = capturedStream;
+    if (onlineSessionSnapshotRef.current) {
+      syncHostStreamingPeers(onlineSessionSnapshotRef.current);
+    }
+    return true;
+  }, [stopOnlineHostStream, syncHostStreamingPeers]);
 
   useEffect(() => {
     setEmulatorWarning(undefined);
@@ -283,6 +571,9 @@ export function PlayPage() {
       setOnlineLastRemoteInput(undefined);
       setOnlineConnectedMembers(1);
       setOnlineLatencyMs(undefined);
+      setOnlineSessionSnapshot(undefined);
+      clearOnlineHostPeers();
+      stopOnlineHostStream();
       onlineSessionClosedRef.current = false;
       return;
     }
@@ -375,7 +666,14 @@ export function PlayPage() {
 
         if (message.type === 'room_state') {
           const connectedMembers = message.session.members.filter((member) => member.connected).length;
+          setOnlineSessionSnapshot(message.session);
           setOnlineConnectedMembers(Math.max(connectedMembers, 1));
+          syncHostStreamingPeers(message.session);
+          return;
+        }
+
+        if (message.type === 'webrtc_signal') {
+          handleHostWebRtcSignal(message);
           return;
         }
 
@@ -384,6 +682,9 @@ export function PlayPage() {
           clearReconnectTimer();
           clearHeartbeatTimer();
           setOnlineRelayStatus('offline');
+          setOnlineSessionSnapshot(undefined);
+          clearOnlineHostPeers();
+          stopOnlineHostStream();
           setEmulatorWarning(message.reason || 'Online session closed.');
           socket.close();
           return;
@@ -415,6 +716,7 @@ export function PlayPage() {
         }
         if (onlineSessionClosedRef.current) {
           setOnlineRelayStatus('offline');
+          setOnlineSessionSnapshot(undefined);
           return;
         }
         setOnlineRelayStatus('connecting');
@@ -436,13 +738,67 @@ export function PlayPage() {
       cancelled = true;
       clearReconnectTimer();
       clearHeartbeatTimer();
+      clearOnlineHostPeers();
+      stopOnlineHostStream();
       const socket = onlineSocketRef.current;
       if (socket) {
         socket.close();
         onlineSocketRef.current = null;
       }
     };
-  }, [onlineClientId, onlineCode, onlineRelayEnabled, setEmulatorWarning]);
+  }, [
+    clearOnlineHostPeers,
+    handleHostWebRtcSignal,
+    onlineClientId,
+    onlineCode,
+    onlineRelayEnabled,
+    setEmulatorWarning,
+    stopOnlineHostStream,
+    syncHostStreamingPeers,
+  ]);
+
+  useEffect(() => {
+    if (!onlineRelayEnabled || !isOnlineHost) {
+      clearOnlineHostPeers();
+      stopOnlineHostStream();
+      return;
+    }
+
+    if (status === 'error') {
+      return;
+    }
+
+    if (tryStartHostStreamCapture()) {
+      if (onlineSessionSnapshot) {
+        syncHostStreamingPeers(onlineSessionSnapshot);
+      }
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      const started = tryStartHostStreamCapture();
+      if (!started) {
+        return;
+      }
+      if (onlineSessionSnapshot) {
+        syncHostStreamingPeers(onlineSessionSnapshot);
+      }
+      window.clearInterval(timer);
+    }, ONLINE_STREAM_POLL_INTERVAL_MS);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [
+    clearOnlineHostPeers,
+    isOnlineHost,
+    onlineRelayEnabled,
+    onlineSessionSnapshot,
+    status,
+    stopOnlineHostStream,
+    syncHostStreamingPeers,
+    tryStartHostStreamCapture,
+  ]);
 
   useEffect(() => {
     const onFullscreenChange = (): void => {
@@ -481,6 +837,21 @@ export function PlayPage() {
   const onReset = (): void => {
     const emulator = window.EJS_emulator;
     emulator?.gameManager?.restart?.();
+  };
+
+  const onVirtualControlChange = (control: N64ControlTarget, pressed: boolean): void => {
+    const emulator = window.EJS_emulator;
+    const simulateInput = emulator?.gameManager?.simulateInput ?? emulator?.gameManager?.functions?.simulateInput;
+    if (typeof simulateInput !== 'function') {
+      return;
+    }
+
+    const inputIndex = N64_TARGET_TO_INPUT_INDEX[control];
+    if (typeof inputIndex !== 'number') {
+      return;
+    }
+
+    simulateInput(0, inputIndex, pressed ? 1 : 0);
   };
 
   const onProfileComplete = async (profile: ControllerProfile): Promise<void> => {
@@ -655,7 +1026,9 @@ export function PlayPage() {
   }
 
   return (
-    <section className={`play-page ${menuOpen ? 'play-menu-open' : ''}`}>
+    <section
+      className={`play-page ${menuOpen ? 'play-menu-open' : ''} ${showVirtualController ? 'play-has-virtual-controller' : ''}`}
+    >
       <section ref={playStageRef} className="play-stage">
         <div className="play-overlay-top">
           <div className="play-overlay-left">
@@ -686,6 +1059,9 @@ export function PlayPage() {
             </button>
             <button type="button" onClick={onReset} disabled={status === 'loading' || status === 'error'}>
               Reset
+            </button>
+            <button type="button" onClick={() => setShowVirtualController((value) => !value)}>
+              {showVirtualController ? 'Hide Virtual Pad' : 'Show Virtual Pad'}
             </button>
             <button type="button" onClick={() => void onToggleFullscreen()}>
               {isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}
@@ -731,6 +1107,9 @@ export function PlayPage() {
             <button type="button" onClick={() => navigate(libraryRoute)}>
               Back to Library
             </button>
+            <button type="button" onClick={() => setShowVirtualController((value) => !value)}>
+              {showVirtualController ? 'Hide Virtual Controller' : 'Show Virtual Controller'}
+            </button>
             {onlineRelayEnabled && sessionRoute ? <Link to={sessionRoute}>Back to Session</Link> : null}
             {onlineRelayEnabled ? (
               <button type="button" onClick={() => void onCopyInviteLink()}>
@@ -748,6 +1127,7 @@ export function PlayPage() {
               <span className="status-pill">Players: {onlineConnectedMembers}/4</span>
               <span className="status-pill">Remote events: {onlineRemoteEventsApplied}</span>
               <span className="status-pill">Code: {onlineCode}</span>
+              {isOnlineHost ? <span className="status-pill">Stream viewers: {onlineStreamPeers}</span> : null}
               <span
                 className={
                   onlineLatencyMs
@@ -768,6 +1148,13 @@ export function PlayPage() {
               </span>
             </div>
             {onlineLastRemoteInput ? <p className="online-subtle">Last remote input: {onlineLastRemoteInput}</p> : null}
+            {isOnlineHost ? (
+              <p className="online-subtle">
+                Host stream source: emulator canvas ({ONLINE_STREAM_CAPTURE_FPS} fps target, video-only stream path).
+              </p>
+            ) : (
+              <p className="warning-text">Only Player 1 host should run the emulator on this page.</p>
+            )}
           </section>
         ) : null}
 
@@ -831,6 +1218,12 @@ export function PlayPage() {
           </section>
         ) : null}
       </aside>
+
+      {showVirtualController ? (
+        <div className="virtual-controller-dock">
+          <VirtualController disabled={status === 'loading' || status === 'error'} onControlChange={onVirtualControlChange} />
+        </div>
+      ) : null}
 
       {wizardOpen ? (
         <div className="modal-backdrop" role="dialog" aria-modal="true">
