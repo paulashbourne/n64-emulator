@@ -5,6 +5,8 @@ import { clearIndexedData } from '../storage/db';
 import { getPreferredBootMode, setPreferredBootMode } from '../storage/appSettings';
 import { useAppStore } from '../state/appStore';
 
+const DEFAULT_KEYBOARD_PROFILE_ID = 'profile:keyboard-default';
+
 export function SettingsPage() {
   const profiles = useAppStore((state) => state.profiles);
   const loadProfiles = useAppStore((state) => state.loadProfiles);
@@ -96,8 +98,21 @@ export function SettingsPage() {
                   Device: {profile.deviceId} • Deadzone: {profile.deadzone.toFixed(2)}
                   {profile.romHash ? ` • ROM-specific (${profile.romHash.slice(0, 12)}…)` : ' • Global'}
                 </p>
+                <p>
+                  {Object.keys(profile.bindings).length} mapped controls
+                  {profile.profileId === DEFAULT_KEYBOARD_PROFILE_ID ? ' • Recommended baseline profile' : ''}
+                </p>
               </div>
-              <button type="button" onClick={() => void onDeleteProfile(profile.profileId)} disabled={working}>
+              <button
+                type="button"
+                onClick={() => void onDeleteProfile(profile.profileId)}
+                disabled={working || profile.profileId === DEFAULT_KEYBOARD_PROFILE_ID}
+                title={
+                  profile.profileId === DEFAULT_KEYBOARD_PROFILE_ID
+                    ? 'Default keyboard profile is always available.'
+                    : undefined
+                }
+              >
                 Delete
               </button>
             </li>

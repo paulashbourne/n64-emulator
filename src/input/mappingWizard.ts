@@ -32,6 +32,21 @@ const KEYBOARD_PRESET_BINDINGS: Partial<Record<N64ControlTarget, InputBinding>> 
   analog_down: { source: 'keyboard', code: 'KeyS' },
 };
 
+export function createKeyboardPresetBindings(): Partial<Record<N64ControlTarget, InputBinding>> {
+  const bindings: Partial<Record<N64ControlTarget, InputBinding>> = {};
+
+  for (const target of N64_MAPPING_ORDER) {
+    const binding = KEYBOARD_PRESET_BINDINGS[target];
+    if (!binding) {
+      continue;
+    }
+
+    bindings[target] = { ...binding };
+  }
+
+  return bindings;
+}
+
 export function createInitialWizardState(
   bindings?: Partial<Record<N64ControlTarget, InputBinding>>,
 ): MappingWizardState {
@@ -103,20 +118,9 @@ export function resetWizard(): MappingWizardState {
 }
 
 export function applyKeyboardPreset(): MappingWizardState {
-  const bindings: Partial<Record<N64ControlTarget, InputBinding>> = {};
-
-  for (const target of N64_MAPPING_ORDER) {
-    const binding = KEYBOARD_PRESET_BINDINGS[target];
-    if (!binding) {
-      continue;
-    }
-
-    bindings[target] = { ...binding };
-  }
-
   return {
     stepIndex: N64_MAPPING_ORDER.length,
-    bindings,
+    bindings: createKeyboardPresetBindings(),
     skippedTargets: [],
   };
 }

@@ -1,6 +1,7 @@
 import {
   applyKeyboardPreset,
   assignBindingAndAdvance,
+  createKeyboardPresetBindings,
   createInitialWizardState,
   currentTarget,
   goBack,
@@ -52,5 +53,13 @@ describe('mapping wizard state machine', () => {
     expect(state.bindings.a?.code).toBe('KeyX');
     expect(state.bindings.start?.code).toBe('Enter');
     expect(state.skippedTargets).toHaveLength(0);
+  });
+
+  test('keyboard preset bindings are cloned on each call', () => {
+    const first = createKeyboardPresetBindings();
+    const second = createKeyboardPresetBindings();
+    expect(first).not.toBe(second);
+    expect(first.a?.code).toBe('KeyX');
+    expect(second.a?.code).toBe('KeyX');
   });
 });

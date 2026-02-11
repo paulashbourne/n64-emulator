@@ -147,6 +147,16 @@ label {
   padding: 1.25rem;
 }
 
+.app-shell-play {
+  max-width: none;
+  margin: 0;
+  padding: 0;
+}
+
+.app-main-play {
+  min-height: 100vh;
+}
+
 .app-header {
   display: flex;
   justify-content: space-between;
@@ -317,30 +327,153 @@ label {
   color: #ffe2b6;
 }
 
-.play-header {
-  display: grid;
-  gap: 0.8rem;
+.play-page {
+  min-height: 100vh;
+  position: relative;
+  background:
+    radial-gradient(circle at 12% 18%, rgba(46, 196, 182, 0.16), transparent 32%),
+    radial-gradient(circle at 88% 14%, rgba(255, 159, 28, 0.18), transparent 30%),
+    #090d15;
 }
 
-.play-canvas-panel {
+.play-stage {
+  min-height: 100vh;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  gap: 0.8rem;
+  padding: 0.9rem;
+}
+
+.play-overlay-top,
+.play-overlay-bottom {
+  position: relative;
+  z-index: 4;
   display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.9rem;
+  padding: 0.7rem 0.85rem;
+  border-radius: 0.9rem;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  background: rgba(12, 16, 24, 0.72);
+  backdrop-filter: blur(6px);
+}
+
+.play-overlay-left {
+  display: flex;
+  align-items: center;
+  gap: 0.72rem;
+}
+
+.play-menu-toggle {
+  border-radius: 999px;
+  border-color: rgba(255, 159, 28, 0.66);
+  background: rgba(255, 159, 28, 0.22);
+}
+
+.play-overlay-meta h1 {
+  margin: 0;
+  font-size: clamp(1rem, 2vw, 1.25rem);
+}
+
+.play-overlay-meta p {
+  margin: 0.2rem 0 0;
+  color: var(--ink-muted);
+}
+
+.play-overlay-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.play-stage-surface {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: flex-start;
   justify-content: center;
+  min-height: 0;
 }
 
 .ejs-player-host {
-  width: min(100%, 960px);
-  min-height: 540px;
   background: #0d1015;
   border-radius: 0.62rem;
   border: 1px solid var(--border);
-  aspect-ratio: 4 / 3;
   overflow: hidden;
+}
+
+.ejs-player-host-focus {
+  width: min(100%, calc((100vh - 10.5rem) * 1.333));
+  max-height: calc(100vh - 10.5rem);
+  aspect-ratio: 4 / 3;
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.46);
 }
 
 .ejs-player-host canvas {
   image-rendering: pixelated;
   width: 100%;
   height: 100%;
+}
+
+.play-overlay-bottom {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
+
+.play-overlay-bottom p {
+  margin: 0;
+}
+
+.play-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  border: 0;
+  background: rgba(2, 4, 8, 0.62);
+  z-index: 110;
+  border-radius: 0;
+  padding: 0;
+}
+
+.play-side-menu {
+  position: fixed;
+  top: 0;
+  right: 0;
+  width: min(420px, 92vw);
+  height: 100vh;
+  z-index: 120;
+  transform: translateX(101%);
+  transition: transform 220ms ease;
+  border-left: 1px solid rgba(255, 255, 255, 0.2);
+  background: linear-gradient(180deg, rgba(14, 20, 31, 0.97), rgba(12, 16, 24, 0.98));
+  box-shadow: -24px 0 40px rgba(0, 0, 0, 0.4);
+  padding: 1rem;
+  overflow-y: auto;
+}
+
+.play-side-menu.open {
+  transform: translateX(0);
+}
+
+.play-side-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.7rem;
+}
+
+.play-side-header h2 {
+  margin: 0;
+}
+
+.play-side-section {
+  padding-top: 0.8rem;
+  margin-top: 0.8rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.14);
+}
+
+.play-side-section h3 {
+  margin-top: 0;
 }
 
 .modal-backdrop {
@@ -617,8 +750,18 @@ label {
     grid-template-columns: 1fr;
   }
 
-  .ejs-player-host {
-    min-height: 360px;
+  .play-overlay-top {
+    flex-wrap: wrap;
+  }
+
+  .play-overlay-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .ejs-player-host-focus {
+    width: min(100%, calc((100vh - 13rem) * 1.333));
+    max-height: calc(100vh - 13rem);
   }
 
   .online-page-grid {
@@ -629,6 +772,10 @@ label {
 @media (max-width: 720px) {
   .app-shell {
     padding: 0.8rem;
+  }
+
+  .app-shell-play {
+    padding: 0;
   }
 
   .app-header {
@@ -658,5 +805,49 @@ label {
   .recent-session-list li {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .play-stage {
+    padding: 0.55rem;
+    gap: 0.6rem;
+  }
+
+  .play-overlay-top,
+  .play-overlay-bottom {
+    padding: 0.62rem 0.65rem;
+  }
+
+  .play-overlay-left {
+    width: 100%;
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .play-overlay-meta h1 {
+    font-size: 1rem;
+  }
+
+  .ejs-player-host-focus {
+    width: 100%;
+    max-height: calc(100vh - 13.4rem);
+  }
+
+  .play-side-menu {
+    width: min(100vw, 100%);
+  }
+}
+
+@media (hover: none), (pointer: coarse) {
+  button,
+  input,
+  select {
+    min-height: 2.75rem;
+  }
+
+  .play-overlay-actions button,
+  .play-menu-toggle {
+    min-height: 2.85rem;
+    padding-inline: 0.95rem;
   }
 }

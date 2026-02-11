@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 
+import { createKeyboardPresetBindings } from '../input/mappingWizard';
 import {
   getPreferredFavoritesOnly,
   getPreferredLibrarySortMode,
@@ -20,6 +21,8 @@ import {
   supportsDirectoryPicker,
   type RomSortMode,
 } from '../roms/catalogService';
+
+const DEFAULT_KEYBOARD_PROFILE_ID = 'profile:keyboard-default';
 
 interface AppStoreState {
   roms: RomRecord[];
@@ -50,6 +53,22 @@ interface AppStoreState {
   setActiveProfile: (profileId?: string) => void;
   markLastPlayed: (romId: string) => Promise<void>;
   setEmulatorWarning: (warning?: string) => void;
+}
+
+async function ensureDefaultKeyboardProfile(): Promise<void> {
+  const existing = await db.profiles.get(DEFAULT_KEYBOARD_PROFILE_ID);
+  if (existing) {
+    return;
+  }
+
+  await db.profiles.put({
+    profileId: DEFAULT_KEYBOARD_PROFILE_ID,
+    name: 'Keyboard Default',
+    deviceId: 'keyboard-default',
+    deadzone: 0.2,
+    bindings: createKeyboardPresetBindings(),
+    updatedAt: Date.now(),
+  });
 }
 
 async function queryProfiles(romHash?: string): Promise<ControllerProfile[]> {
@@ -225,6 +244,7 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
   },
 
   loadProfiles: async (romHash?: string) => {
+    await ensureDefaultKeyboardProfile();
     const profiles = await queryProfiles(romHash);
     const activeProfileId = get().activeProfileId;
 

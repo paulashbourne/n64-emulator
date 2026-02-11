@@ -12,6 +12,15 @@ import { useAppStore } from '../state/appStore';
 
 const NO_ROM_SELECTED = '__none__';
 
+function normalizePlayerName(name: string, fallback: string): string {
+  const normalized = name.replace(/\s+/g, ' ').trim().slice(0, 32);
+  return normalized.length > 0 ? normalized : fallback;
+}
+
+function normalizeInviteCode(code: string): string {
+  return code.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6);
+}
+
 export function OnlinePage() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
@@ -22,7 +31,7 @@ export function OnlinePage() {
   const [hostName, setHostName] = useState('Player 1');
   const [joinName, setJoinName] = useState('Player');
   const [selectedRomId, setSelectedRomId] = useState<string>(NO_ROM_SELECTED);
-  const [joinCode, setJoinCode] = useState((searchParams.get('code') ?? '').trim().toUpperCase());
+  const [joinCode, setJoinCode] = useState(normalizeInviteCode(searchParams.get('code') ?? ''));
   const [error, setError] = useState<string>();
   const [creating, setCreating] = useState(false);
   const [joining, setJoining] = useState(false);
@@ -69,8 +78,10 @@ export function OnlinePage() {
     setError(undefined);
     setCreating(true);
     try {
+      const normalizedHostName = normalizePlayerName(hostName, 'Player 1');
+      setHostName(normalizedHostName);
       const created = await createOnlineSession({
-        hostName,
+        hostName: normalizedHostName,
         romId: selectedRom?.id,
         romTitle: selectedRom?.title,
       });
@@ -78,7 +89,7 @@ export function OnlinePage() {
         await rememberOnlineSession({
           code: created.code,
           clientId: created.clientId,
-          playerName: hostName,
+          playerName: normalizedHostName,
           role: 'host',
           romTitle: selectedRom?.title,
         });
@@ -99,15 +110,22 @@ export function OnlinePage() {
     setError(undefined);
     setJoining(true);
     try {
+      const normalizedJoinName = normalizePlayerName(joinName, 'Player');
+      const normalizedCode = normalizeInviteCode(joinCode);
+      setJoinName(normalizedJoinName);
+      setJoinCode(normalizedCode);
+      if (normalizedCode.length !== 6) {
+        throw new Error('Invite code should be 6 letters/numbers.');
+      }
       const joined = await joinOnlineSession({
-        code: joinCode,
-        name: joinName,
+        code: normalizedCode,
+        name: normalizedJoinName,
       });
       try {
         await rememberOnlineSession({
           code: joined.code,
           clientId: joined.clientId,
-          playerName: joinName,
+          playerName: normalizedJoinName,
           role: 'guest',
           romTitle: joined.session.romTitle,
         });
@@ -209,14 +227,14 @@ export function OnlinePage() {
               <input
                 type="text"
                 value={joinCode}
-                onChange={(event) => setJoinCode(event.target.value.toUpperCase())}
+                onChange={(event) => setJoinCode(normalizeInviteCode(event.target.value))}
                 placeholder="ABC123"
                 maxLength={6}
               />
             </label>
           </div>
           <div className="wizard-actions">
-            <button type="button" onClick={() => void onJoinSession()} disabled={joining || creating || joinCode.trim().length < 4}>
+            <button type="button" onClick={() => void onJoinSession()} disabled={joining || creating || joinCode.trim().length !== 6}>
               {joining ? 'Joining…' : 'Join by Invite Code'}
             </button>
           </div>

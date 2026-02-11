@@ -29,6 +29,7 @@ const PLAYER_SELECTOR = '#emulatorjs-player';
 const ONLINE_HEARTBEAT_INTERVAL_MS = 10_000;
 
 type SessionStatus = 'loading' | 'running' | 'paused' | 'error';
+type WizardMode = 'create' | 'edit';
 
 function revokeRomBlobUrl(ref: MutableRefObject<string | null>): void {
   if (!ref.current) {
@@ -86,6 +87,7 @@ export function PlayPage() {
 
   const romBlobUrlRef = useRef<string | null>(null);
   const lastAppliedProfileRef = useRef<string | null>(null);
+  const playStageRef = useRef<HTMLElement | null>(null);
   const onlineSocketRef = useRef<WebSocket | null>(null);
   const onlineReconnectTimerRef = useRef<number | null>(null);
   const onlineHeartbeatTimerRef = useRef<number | null>(null);
@@ -102,6 +104,9 @@ export function PlayPage() {
   const [coreLabel, setCoreLabel] = useState('parallel_n64');
   const [error, setError] = useState<string>();
   const [wizardOpen, setWizardOpen] = useState(false);
+  const [wizardMode, setWizardMode] = useState<WizardMode>('create');
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
   const [bootMode, setBootMode] = useState<EmulatorBootMode>('auto');
   const [bootModeLoaded, setBootModeLoaded] = useState(false);
   const [bootNonce, setBootNonce] = useState(0);
@@ -439,6 +444,22 @@ export function PlayPage() {
     };
   }, [onlineClientId, onlineCode, onlineRelayEnabled, setEmulatorWarning]);
 
+  useEffect(() => {
+    const onFullscreenChange = (): void => {
+      const stage = playStageRef.current;
+      if (!stage) {
+        setIsFullscreen(false);
+        return;
+      }
+      setIsFullscreen(document.fullscreenElement === stage);
+    };
+
+    document.addEventListener('fullscreenchange', onFullscreenChange);
+    return () => {
+      document.removeEventListener('fullscreenchange', onFullscreenChange);
+    };
+  }, []);
+
   const onPauseResume = (): void => {
     const emulator = window.EJS_emulator;
     if (!emulator) {
@@ -466,6 +487,41 @@ export function PlayPage() {
     await saveProfile(profile);
     setActiveProfile(profile.profileId);
     setWizardOpen(false);
+    setWizardMode('create');
+  };
+
+  const openCreateWizard = (): void => {
+    setWizardMode('create');
+    setWizardOpen(true);
+    setMenuOpen(true);
+  };
+
+  const openEditWizard = (): void => {
+    if (!activeProfile) {
+      openCreateWizard();
+      return;
+    }
+    setWizardMode('edit');
+    setWizardOpen(true);
+    setMenuOpen(true);
+  };
+
+  const onToggleFullscreen = async (): Promise<void> => {
+    const stage = playStageRef.current;
+    if (!stage) {
+      return;
+    }
+
+    try {
+      if (document.fullscreenElement === stage) {
+        await document.exitFullscreen();
+        return;
+      }
+
+      await stage.requestFullscreen();
+    } catch {
+      setEmulatorWarning('Fullscreen is unavailable in this browser context.');
+    }
   };
 
   const onRetryBoot = (mode: EmulatorBootMode): void => {
@@ -543,6 +599,13 @@ export function PlayPage() {
       if (event.code === 'Escape' && wizardOpen) {
         event.preventDefault();
         setWizardOpen(false);
+        setWizardMode('create');
+        return;
+      }
+
+      if (event.code === 'Escape' && menuOpen) {
+        event.preventDefault();
+        setMenuOpen(false);
         return;
       }
 
@@ -564,7 +627,15 @@ export function PlayPage() {
 
       if (event.code === 'KeyM') {
         event.preventDefault();
+        setWizardMode('create');
         setWizardOpen(true);
+        setMenuOpen(true);
+        return;
+      }
+
+      if (event.code === 'KeyO') {
+        event.preventDefault();
+        setMenuOpen((value) => !value);
       }
     };
 
@@ -572,7 +643,7 @@ export function PlayPage() {
     return () => {
       window.removeEventListener('keydown', onKeydown);
     };
-  }, [status, wizardOpen]);
+  }, [menuOpen, status, wizardOpen]);
 
   if (!decodedRomId) {
     return (
@@ -584,102 +655,192 @@ export function PlayPage() {
   }
 
   return (
-    <section className="play-page">
-      <header className="panel play-header">
-        <div>
-          <h1>{rom?.title ?? 'Loading ROM…'}</h1>
-          <p>
-            Status: {status} • Renderer: {backendLabel}
-          </p>
-          <p>Core: {coreLabel}</p>
-          <p>Boot mode: {bootMode === 'auto' ? 'Auto fallback' : bootMode === 'local' ? 'Local cores only' : 'CDN cores only'}</p>
-          {onlineRelayEnabled ? (
-            <div className="session-status-row">
-              <span className={relayStatusClass(onlineRelayStatus)}>Relay: {onlineRelayStatus}</span>
-              <span className="status-pill">Code: {onlineCode}</span>
-              <span className="status-pill">Players: {onlineConnectedMembers}/4</span>
-              <span className="status-pill">Remote events: {onlineRemoteEventsApplied}</span>
-              <span className={onlineLatencyMs ? (onlineLatencyMs <= 90 ? 'status-pill status-good' : onlineLatencyMs <= 170 ? 'status-pill status-warn' : 'status-pill status-bad') : 'status-pill'}>
-                Latency: {onlineLatencyMs ? `${onlineLatencyMs} ms` : onlineRelayStatus === 'connected' ? 'Measuring…' : 'Unavailable'}
-              </span>
+    <section className={`play-page ${menuOpen ? 'play-menu-open' : ''}`}>
+      <section ref={playStageRef} className="play-stage">
+        <div className="play-overlay-top">
+          <div className="play-overlay-left">
+            <button
+              type="button"
+              className="play-menu-toggle"
+              onClick={() => setMenuOpen((value) => !value)}
+            >
+              {menuOpen ? 'Hide Menu' : 'Menu'}
+            </button>
+            <div className="play-overlay-meta">
+              <h1>{rom?.title ?? 'Loading ROM…'}</h1>
+              <p>
+                {status === 'loading'
+                  ? 'Loading'
+                  : status === 'running'
+                    ? 'Running'
+                    : status === 'paused'
+                      ? 'Paused'
+                      : 'Error'}{' '}
+                • {onlineRelayEnabled ? `Online ${onlineCode}` : 'Local Play'}
+              </p>
             </div>
-          ) : null}
-          {onlineRelayEnabled && onlineLastRemoteInput ? <p>Last remote input: {onlineLastRemoteInput}</p> : null}
-          {activeProfile ? <p>Input profile: {activeProfile.name}</p> : <p>No input profile selected.</p>}
-        </div>
-        <div className="toolbar">
-          <button type="button" onClick={onPauseResume} disabled={status === 'loading' || status === 'error'}>
-            {status === 'running' ? 'Pause' : 'Resume'}
-          </button>
-          <button type="button" onClick={onReset} disabled={status === 'loading' || status === 'error'}>
-            Reset
-          </button>
-          <button type="button" onClick={() => setWizardOpen(true)}>
-            Map Controller
-          </button>
-          <button type="button" onClick={() => navigate(libraryRoute)}>Back to Library</button>
-          {onlineRelayEnabled && sessionRoute ? <Link to={sessionRoute}>Back to Session</Link> : null}
-          {onlineRelayEnabled ? (
-            <button type="button" onClick={() => void onCopyInviteLink()}>
-              Copy Invite Link
+          </div>
+          <div className="play-overlay-actions">
+            <button type="button" onClick={onPauseResume} disabled={status === 'loading' || status === 'error'}>
+              {status === 'running' ? 'Pause' : 'Resume'}
             </button>
-          ) : null}
-        </div>
-        <p>First launch can take a few seconds while core files initialize.</p>
-        <p>Shortcuts: Space pause/resume • R reset • M map controller • Esc close wizard.</p>
-        {error ? <p className="error-text">{error}</p> : null}
-        {status === 'error' ? (
-          <div className="toolbar">
-            <button type="button" onClick={() => onRetryBoot('auto')} disabled={clearingCache}>
-              Retry (Auto)
+            <button type="button" onClick={onReset} disabled={status === 'loading' || status === 'error'}>
+              Reset
             </button>
-            <button type="button" onClick={() => onRetryBoot('local')} disabled={clearingCache}>
-              Retry (Local Only)
-            </button>
-            <button type="button" onClick={() => onRetryBoot('cdn')} disabled={clearingCache}>
-              Retry (CDN Only)
-            </button>
-            <button type="button" onClick={() => void onClearCacheAndRetry()} disabled={clearingCache}>
-              {clearingCache ? 'Clearing Cache…' : 'Clear Emulator Cache & Retry'}
+            <button type="button" onClick={() => void onToggleFullscreen()}>
+              {isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}
             </button>
           </div>
-        ) : null}
-        {emulatorWarning ? <p className="warning-text">{emulatorWarning}</p> : null}
-      </header>
+        </div>
 
-      <section className="panel play-canvas-panel">
-        <div id="emulatorjs-player" className="ejs-player-host" aria-label="N64 emulator output" />
+        <div className="play-stage-surface">
+          <div id="emulatorjs-player" className="ejs-player-host ejs-player-host-focus" aria-label="N64 emulator output" />
+        </div>
+
+        <div className="play-overlay-bottom">
+          <p>Shortcuts: Space pause/resume • R reset • M map controller • O menu • Esc close overlays.</p>
+          {error ? <p className="error-text">{error}</p> : null}
+          {emulatorWarning ? <p className="warning-text">{emulatorWarning}</p> : null}
+        </div>
       </section>
 
-      <section className="panel">
-        <h2>Controller Profiles</h2>
-        {profiles.length === 0 ? <p>No profiles yet. Open the mapping wizard to create one.</p> : null}
+      {menuOpen ? (
+        <button
+          type="button"
+          className="play-menu-backdrop"
+          aria-label="Close game menu"
+          onClick={() => setMenuOpen(false)}
+        />
+      ) : null}
 
-        {profiles.length > 0 ? (
-          <label>
-            Active profile
-            <select
-              value={activeProfileId ?? ''}
-              onChange={(event) => setActiveProfile(event.target.value || undefined)}
-            >
-              <option value="">None</option>
-              {profiles.map((profile) => (
-                <option key={profile.profileId} value={profile.profileId}>
-                  {profile.name}
-                  {profile.romHash ? ' (ROM-specific)' : ' (Global)'}
-                </option>
-              ))}
-            </select>
-          </label>
+      <aside className={`play-side-menu ${menuOpen ? 'open' : ''}`} aria-label="Play menu">
+        <header className="play-side-header">
+          <h2>Game Menu</h2>
+          <button type="button" onClick={() => setMenuOpen(false)}>
+            Close
+          </button>
+        </header>
+
+        <div className="play-side-section">
+          <p className="online-subtle">
+            {onlineRelayEnabled
+              ? 'Host-authoritative relay is active. This panel includes host diagnostics and session tools.'
+              : 'Local play focus mode keeps the game front and center. Use this menu for controls and profiles.'}
+          </p>
+          <div className="wizard-actions">
+            <button type="button" onClick={() => navigate(libraryRoute)}>
+              Back to Library
+            </button>
+            {onlineRelayEnabled && sessionRoute ? <Link to={sessionRoute}>Back to Session</Link> : null}
+            {onlineRelayEnabled ? (
+              <button type="button" onClick={() => void onCopyInviteLink()}>
+                Copy Invite Link
+              </button>
+            ) : null}
+          </div>
+        </div>
+
+        {onlineRelayEnabled ? (
+          <section className="play-side-section">
+            <h3>Online Status</h3>
+            <div className="session-status-row">
+              <span className={relayStatusClass(onlineRelayStatus)}>Relay: {onlineRelayStatus}</span>
+              <span className="status-pill">Players: {onlineConnectedMembers}/4</span>
+              <span className="status-pill">Remote events: {onlineRemoteEventsApplied}</span>
+              <span className="status-pill">Code: {onlineCode}</span>
+              <span
+                className={
+                  onlineLatencyMs
+                    ? onlineLatencyMs <= 90
+                      ? 'status-pill status-good'
+                      : onlineLatencyMs <= 170
+                        ? 'status-pill status-warn'
+                        : 'status-pill status-bad'
+                    : 'status-pill'
+                }
+              >
+                Latency:{' '}
+                {onlineLatencyMs
+                  ? `${onlineLatencyMs} ms`
+                  : onlineRelayStatus === 'connected'
+                    ? 'Measuring…'
+                    : 'Unavailable'}
+              </span>
+            </div>
+            {onlineLastRemoteInput ? <p className="online-subtle">Last remote input: {onlineLastRemoteInput}</p> : null}
+          </section>
         ) : null}
-      </section>
+
+        <section className="play-side-section">
+          <h3>Controller Profiles</h3>
+          {profiles.length === 0 ? <p>No profiles yet. Create one to map controls.</p> : null}
+          {profiles.length > 0 ? (
+            <label>
+              Active profile
+              <select value={activeProfileId ?? ''} onChange={(event) => setActiveProfile(event.target.value || undefined)}>
+                <option value="">None</option>
+                {profiles.map((profile) => (
+                  <option key={profile.profileId} value={profile.profileId}>
+                    {profile.name}
+                    {profile.romHash ? ' (ROM-specific)' : ' (Global)'}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
+          <div className="wizard-actions">
+            <button type="button" onClick={openCreateWizard}>
+              New Profile
+            </button>
+            <button type="button" onClick={openEditWizard} disabled={!activeProfile}>
+              Edit Active
+            </button>
+          </div>
+          {activeProfile ? (
+            <p className="online-subtle">
+              Active: {activeProfile.name} • Device {activeProfile.deviceId} • Deadzone {activeProfile.deadzone.toFixed(2)}
+            </p>
+          ) : null}
+        </section>
+
+        <section className="play-side-section">
+          <h3>Emulator Runtime</h3>
+          <p>Renderer: {backendLabel}</p>
+          <p>Core: {coreLabel}</p>
+          <p>Boot mode: {bootMode === 'auto' ? 'Auto fallback' : bootMode === 'local' ? 'Local cores only' : 'CDN cores only'}</p>
+          <p>First launch can take a few seconds while emulator assets initialize.</p>
+        </section>
+
+        {status === 'error' ? (
+          <section className="play-side-section">
+            <h3>Recovery</h3>
+            <div className="wizard-actions">
+              <button type="button" onClick={() => onRetryBoot('auto')} disabled={clearingCache}>
+                Retry (Auto)
+              </button>
+              <button type="button" onClick={() => onRetryBoot('local')} disabled={clearingCache}>
+                Retry (Local)
+              </button>
+              <button type="button" onClick={() => onRetryBoot('cdn')} disabled={clearingCache}>
+                Retry (CDN)
+              </button>
+              <button type="button" onClick={() => void onClearCacheAndRetry()} disabled={clearingCache}>
+                {clearingCache ? 'Clearing Cache…' : 'Clear Cache & Retry'}
+              </button>
+            </div>
+          </section>
+        ) : null}
+      </aside>
 
       {wizardOpen ? (
         <div className="modal-backdrop" role="dialog" aria-modal="true">
           <ControllerWizard
             romHash={rom?.hash}
-            initialProfile={activeProfile}
-            onCancel={() => setWizardOpen(false)}
+            initialProfile={wizardMode === 'edit' ? activeProfile : undefined}
+            onCancel={() => {
+              setWizardOpen(false);
+              setWizardMode('create');
+            }}
             onComplete={onProfileComplete}
           />
         </div>

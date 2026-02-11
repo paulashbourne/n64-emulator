@@ -1,4 +1,4 @@
-import { NavLink, Route, Routes } from 'react-router-dom';
+import { NavLink, Route, Routes, useLocation } from 'react-router-dom';
 
 import { LibraryPage } from './pages/LibraryPage';
 import { OnlinePage } from './pages/OnlinePage';
@@ -7,24 +7,29 @@ import { PlayPage } from './pages/PlayPage';
 import { SettingsPage } from './pages/SettingsPage';
 
 function App() {
+  const location = useLocation();
+  const isPlayRoute = location.pathname.startsWith('/play/');
+
   return (
-    <div className="app-shell">
-      <header className="app-header">
-        <div>
-          <p className="eyebrow">Browser N64 Emulator</p>
-          <h1>Local ROM Launcher</h1>
-        </div>
+    <div className={`app-shell ${isPlayRoute ? 'app-shell-play' : ''}`}>
+      {!isPlayRoute ? (
+        <header className="app-header">
+          <div>
+            <p className="eyebrow">Browser N64 Emulator</p>
+            <h1>Local ROM Launcher</h1>
+          </div>
 
-        <nav>
-          <NavLink to="/" end>
-            Library
-          </NavLink>
-          <NavLink to="/online">Online</NavLink>
-          <NavLink to="/settings">Settings</NavLink>
-        </nav>
-      </header>
+          <nav>
+            <NavLink to="/" end>
+              Library
+            </NavLink>
+            <NavLink to="/online">Online</NavLink>
+            <NavLink to="/settings">Settings</NavLink>
+          </nav>
+        </header>
+      ) : null}
 
-      <main>
+      <main className={isPlayRoute ? 'app-main-play' : undefined}>
         <Routes>
           <Route path="/" element={<LibraryPage />} />
           <Route path="/online" element={<OnlinePage />} />
