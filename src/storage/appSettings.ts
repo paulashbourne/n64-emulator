@@ -104,12 +104,12 @@ function normalizeRecentOnlineSession(input: unknown): RecentOnlineSession | nul
 }
 
 export async function getRecentOnlineSessions(): Promise<RecentOnlineSession[]> {
-  const setting = await db.settings.get(RECENT_ONLINE_SESSIONS_KEY);
-  if (!setting) {
-    return [];
-  }
-
   try {
+    const setting = await db.settings.get(RECENT_ONLINE_SESSIONS_KEY);
+    if (!setting) {
+      return [];
+    }
+
     const decoded = JSON.parse(setting.value) as unknown[];
     if (!Array.isArray(decoded)) {
       return [];
@@ -147,13 +147,21 @@ export async function rememberOnlineSession(input: {
   );
   const next = [normalized, ...deduped].slice(0, MAX_RECENT_ONLINE_SESSIONS);
 
-  await db.settings.put({
-    key: RECENT_ONLINE_SESSIONS_KEY,
-    value: JSON.stringify(next),
-    updatedAt: Date.now(),
-  });
+  try {
+    await db.settings.put({
+      key: RECENT_ONLINE_SESSIONS_KEY,
+      value: JSON.stringify(next),
+      updatedAt: Date.now(),
+    });
+  } catch (error) {
+    throw error instanceof Error ? error : new Error('Could not store recent online session.');
+  }
 }
 
 export async function clearRecentOnlineSessions(): Promise<void> {
-  await db.settings.delete(RECENT_ONLINE_SESSIONS_KEY);
+  try {
+    await db.settings.delete(RECENT_ONLINE_SESSIONS_KEY);
+  } catch (error) {
+    throw error instanceof Error ? error : new Error('Could not clear recent online sessions.');
+  }
 }

@@ -28,6 +28,7 @@ export function OnlinePage() {
   const [joining, setJoining] = useState(false);
   const [recentSessions, setRecentSessions] = useState<RecentOnlineSession[]>([]);
   const [loadingRecentSessions, setLoadingRecentSessions] = useState(true);
+  const [recentSessionsWarning, setRecentSessionsWarning] = useState<string>();
 
   useEffect(() => {
     void refreshRoms();
@@ -36,10 +37,20 @@ export function OnlinePage() {
   useEffect(() => {
     let cancelled = false;
     const loadRecentSessions = async (): Promise<void> => {
-      const recent = await getRecentOnlineSessions();
-      if (!cancelled) {
-        setRecentSessions(recent);
-        setLoadingRecentSessions(false);
+      try {
+        const recent = await getRecentOnlineSessions();
+        if (!cancelled) {
+          setRecentSessions(recent);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          const message = error instanceof Error ? error.message : 'Recent sessions are temporarily unavailable.';
+          setRecentSessionsWarning(message);
+        }
+      } finally {
+        if (!cancelled) {
+          setLoadingRecentSessions(false);
+        }
       }
     };
 
@@ -63,13 +74,18 @@ export function OnlinePage() {
         romId: selectedRom?.id,
         romTitle: selectedRom?.title,
       });
-      await rememberOnlineSession({
-        code: created.code,
-        clientId: created.clientId,
-        playerName: hostName,
-        role: 'host',
-        romTitle: selectedRom?.title,
-      });
+      try {
+        await rememberOnlineSession({
+          code: created.code,
+          clientId: created.clientId,
+          playerName: hostName,
+          role: 'host',
+          romTitle: selectedRom?.title,
+        });
+      } catch (rememberError) {
+        const warning = rememberError instanceof Error ? rememberError.message : 'Could not save recent session locally.';
+        setRecentSessionsWarning(warning);
+      }
       navigate(`/online/session/${created.code}?clientId=${encodeURIComponent(created.clientId)}`);
     } catch (sessionError) {
       const message = sessionError instanceof Error ? sessionError.message : 'Failed to create session.';
@@ -87,13 +103,18 @@ export function OnlinePage() {
         code: joinCode,
         name: joinName,
       });
-      await rememberOnlineSession({
-        code: joined.code,
-        clientId: joined.clientId,
-        playerName: joinName,
-        role: 'guest',
-        romTitle: joined.session.romTitle,
-      });
+      try {
+        await rememberOnlineSession({
+          code: joined.code,
+          clientId: joined.clientId,
+          playerName: joinName,
+          role: 'guest',
+          romTitle: joined.session.romTitle,
+        });
+      } catch (rememberError) {
+        const warning = rememberError instanceof Error ? rememberError.message : 'Could not save recent session locally.';
+        setRecentSessionsWarning(warning);
+      }
       navigate(`/online/session/${joined.code}?clientId=${encodeURIComponent(joined.clientId)}`);
     } catch (joinError) {
       const message = joinError instanceof Error ? joinError.message : 'Failed to join session.';
@@ -104,8 +125,14 @@ export function OnlinePage() {
   };
 
   const onClearRecentSessions = async (): Promise<void> => {
-    await clearRecentOnlineSessions();
-    setRecentSessions([]);
+    try {
+      await clearRecentOnlineSessions();
+      setRecentSessions([]);
+      setRecentSessionsWarning(undefined);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Could not clear recent sessions.';
+      setRecentSessionsWarning(message);
+    }
   };
 
   return (
@@ -117,6 +144,7 @@ export function OnlinePage() {
           <strong>Architecture:</strong> central coordinator + host-authoritative input relay.
         </p>
         {error ? <p className="error-text">{error}</p> : null}
+        {recentSessionsWarning ? <p className="warning-text">{recentSessionsWarning}</p> : null}
       </header>
 
       <div className="online-page-grid">
