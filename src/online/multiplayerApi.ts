@@ -5,6 +5,7 @@ import type {
   KickMemberResponse,
   JoinSessionResponse,
 } from '../types/multiplayer';
+import type { ControllerProfile } from '../types/input';
 
 const REQUEST_TIMEOUT_MS = 10_000;
 
@@ -182,4 +183,42 @@ export function multiplayerSocketUrl(code: string, clientId: string): string {
   url.searchParams.set('code', sanitizeInviteCode(code));
   url.searchParams.set('clientId', clientId);
   return url.toString();
+}
+
+type SharedControllerProfilesResponse = {
+  profiles: ControllerProfile[];
+};
+
+export async function listSharedControllerProfiles(): Promise<ControllerProfile[]> {
+  const response = await fetchWithTimeout(multiplayerApiUrl('/api/controller-profiles'), {
+    method: 'GET',
+  });
+  const payload = await parseJsonOrThrow<SharedControllerProfilesResponse>(response);
+  return Array.isArray(payload.profiles) ? payload.profiles : [];
+}
+
+export async function upsertSharedControllerProfiles(profiles: ControllerProfile[]): Promise<ControllerProfile[]> {
+  const response = await fetchWithTimeout(multiplayerApiUrl('/api/controller-profiles'), {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      profiles,
+    }),
+  });
+  const payload = await parseJsonOrThrow<SharedControllerProfilesResponse>(response);
+  return Array.isArray(payload.profiles) ? payload.profiles : [];
+}
+
+export async function deleteSharedControllerProfile(profileId: string): Promise<void> {
+  const normalized = profileId.trim();
+  if (!normalized) {
+    return;
+  }
+
+  const response = await fetchWithTimeout(multiplayerApiUrl(`/api/controller-profiles/${encodeURIComponent(normalized)}`), {
+    method: 'DELETE',
+  });
+  await parseJsonOrThrow<{ deleted: boolean }>(response);
 }

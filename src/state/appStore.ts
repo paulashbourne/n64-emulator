@@ -2,6 +2,11 @@ import { create } from 'zustand';
 
 import { createKeyboardPresetBindings } from '../input/mappingWizard';
 import {
+  deleteSharedControllerProfile,
+  listSharedControllerProfiles,
+  upsertSharedControllerProfiles,
+} from '../online/multiplayerApi';
+import {
   getPreferredFavoritesOnly,
   getPreferredLibrarySortMode,
   setPreferredFavoritesOnly,
@@ -21,8 +26,57 @@ import {
   supportsDirectoryPicker,
   type RomSortMode,
 } from '../roms/catalogService';
+import type { InputBinding, N64ControlTarget } from '../types/input';
 
 const DEFAULT_KEYBOARD_PROFILE_ID = 'profile:keyboard-default';
+const DEFAULT_SWITCH_PROFILE_ID = 'profile:gamepad-switch';
+const DEFAULT_XBOX_PROFILE_ID = 'profile:gamepad-xbox-series';
+const DEFAULT_BACKBONE_PROFILE_ID = 'profile:gamepad-backbone';
+const DEFAULT_8BITDO_PROFILE_ID = 'profile:gamepad-8bitdo-64';
+
+type FaceLayout = 'xbox' | 'nintendo';
+
+function button(index: number): InputBinding {
+  return {
+    source: 'gamepad_button',
+    index,
+  };
+}
+
+function axis(index: number, direction: 'negative' | 'positive', threshold = 0.3): InputBinding {
+  return {
+    source: 'gamepad_axis',
+    index,
+    direction,
+    threshold,
+  };
+}
+
+function createGamepadPresetBindings(layout: FaceLayout): Partial<Record<N64ControlTarget, InputBinding>> {
+  const aFaceIndex = layout === 'nintendo' ? 1 : 0;
+  const bFaceIndex = layout === 'nintendo' ? 0 : 1;
+
+  return {
+    a: button(aFaceIndex),
+    b: button(bFaceIndex),
+    z: button(6),
+    start: button(9),
+    l: button(4),
+    r: button(5),
+    dpad_up: button(12),
+    dpad_down: button(13),
+    dpad_left: button(14),
+    dpad_right: button(15),
+    c_up: axis(3, 'negative', 0.45),
+    c_down: axis(3, 'positive', 0.45),
+    c_left: axis(2, 'negative', 0.45),
+    c_right: axis(2, 'positive', 0.45),
+    analog_left: axis(0, 'negative', 0.2),
+    analog_right: axis(0, 'positive', 0.2),
+    analog_up: axis(1, 'negative', 0.2),
+    analog_down: axis(1, 'positive', 0.2),
+  };
+}
 
 interface AppStoreState {
   roms: RomRecord[];
@@ -69,6 +123,127 @@ async function ensureDefaultKeyboardProfile(): Promise<void> {
     bindings: createKeyboardPresetBindings(),
     updatedAt: Date.now(),
   });
+}
+
+async function ensureDefaultGamepadProfiles(): Promise<void> {
+  const now = Date.now();
+  const templates: ControllerProfile[] = [
+    {
+      profileId: DEFAULT_SWITCH_PROFILE_ID,
+      name: 'Nintendo Switch Controller',
+      deviceId: 'preset-switch-controller',
+      deadzone: 0.2,
+      bindings: createGamepadPresetBindings('nintendo'),
+      updatedAt: now,
+    },
+    {
+      profileId: DEFAULT_XBOX_PROFILE_ID,
+      name: 'Xbox Series X|S Controller',
+      deviceId: 'preset-xbox-series-controller',
+      deadzone: 0.2,
+      bindings: createGamepadPresetBindings('xbox'),
+      updatedAt: now,
+    },
+    {
+      profileId: DEFAULT_BACKBONE_PROFILE_ID,
+      name: 'Backbone Controller (iPhone)',
+      deviceId: 'preset-backbone-controller',
+      deadzone: 0.2,
+      bindings: createGamepadPresetBindings('xbox'),
+      updatedAt: now,
+    },
+    {
+      profileId: DEFAULT_8BITDO_PROFILE_ID,
+      name: '8BitDo 64 Bluetooth Controller',
+      deviceId: 'preset-8bitdo-64-controller',
+      deadzone: 0.2,
+      bindings: createGamepadPresetBindings('nintendo'),
+      updatedAt: now,
+    },
+  ];
+
+  const missingProfiles: ControllerProfile[] = [];
+  const allProfiles = await db.profiles.toArray();
+  const existingIds = new Set(allProfiles.map((profile) => profile.profileId));
+
+  for (const template of templates) {
+    if (existingIds.has(template.profileId)) {
+      continue;
+    }
+    missingProfiles.push(template);
+  }
+
+  if (missingProfiles.length > 0) {
+    await db.profiles.bulkPut(missingProfiles);
+  }
+}
+
+function normalizeGlobalProfile(profile: ControllerProfile): ControllerProfile {
+  return {
+    ...profile,
+    romHash: undefined,
+  };
+}
+
+async function migrateScopedProfilesToGlobal(): Promise<void> {
+  const allProfiles = await db.profiles.toArray();
+  const scopedProfiles = allProfiles.filter((profile) => profile.romHash !== undefined);
+  if (scopedProfiles.length === 0) {
+    return;
+  }
+
+  await db.profiles.bulkPut(scopedProfiles.map(normalizeGlobalProfile));
+}
+
+async function listLocalGlobalProfiles(): Promise<ControllerProfile[]> {
+  const allProfiles = await db.profiles.toArray();
+  return allProfiles.filter((profile) => profile.romHash === undefined).map(normalizeGlobalProfile);
+}
+
+function toProfileMap(profiles: ControllerProfile[]): Map<string, ControllerProfile> {
+  return new Map(profiles.map((profile) => [profile.profileId, profile]));
+}
+
+async function replaceLocalGlobalProfiles(profiles: ControllerProfile[]): Promise<void> {
+  const allProfiles = await db.profiles.toArray();
+  const globalProfileIds = allProfiles.filter((profile) => profile.romHash === undefined).map((profile) => profile.profileId);
+  if (globalProfileIds.length > 0) {
+    await db.profiles.bulkDelete(globalProfileIds);
+  }
+  if (profiles.length > 0) {
+    await db.profiles.bulkPut(profiles.map(normalizeGlobalProfile));
+  }
+}
+
+async function synchronizeGlobalProfilesFromServer(): Promise<void> {
+  const localGlobalProfiles = await listLocalGlobalProfiles();
+  const localById = toProfileMap(localGlobalProfiles);
+
+  const remoteProfiles = (await listSharedControllerProfiles()).map(normalizeGlobalProfile);
+  const remoteById = toProfileMap(remoteProfiles);
+
+  const profilesToUpload: ControllerProfile[] = [];
+  for (const localProfile of localGlobalProfiles) {
+    const remoteProfile = remoteById.get(localProfile.profileId);
+    if (!remoteProfile || localProfile.updatedAt > remoteProfile.updatedAt) {
+      profilesToUpload.push(localProfile);
+    }
+  }
+
+  let mergedById = new Map(remoteById);
+  if (profilesToUpload.length > 0) {
+    const uploadedProfiles = await upsertSharedControllerProfiles(profilesToUpload);
+    mergedById = toProfileMap(uploadedProfiles.map(normalizeGlobalProfile));
+  } else if (remoteProfiles.length === 0 && localGlobalProfiles.length > 0) {
+    const uploadedProfiles = await upsertSharedControllerProfiles(localGlobalProfiles);
+    mergedById = toProfileMap(uploadedProfiles.map(normalizeGlobalProfile));
+  }
+
+  if (mergedById.size === 0 && localById.size > 0) {
+    mergedById = new Map(localById);
+  }
+
+  await replaceLocalGlobalProfiles([...mergedById.values()]);
 }
 
 async function queryProfiles(romHash?: string): Promise<ControllerProfile[]> {
@@ -245,26 +420,48 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
 
   loadProfiles: async (romHash?: string) => {
     await ensureDefaultKeyboardProfile();
+    await ensureDefaultGamepadProfiles();
+    await migrateScopedProfilesToGlobal();
+    try {
+      await synchronizeGlobalProfilesFromServer();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown profile sync error.';
+      console.warn(`Controller profile sync unavailable: ${message}`);
+    }
     const profiles = await queryProfiles(romHash);
     const activeProfileId = get().activeProfileId;
+    const keyboardProfileId = profiles.find((profile) => profile.profileId === DEFAULT_KEYBOARD_PROFILE_ID)?.profileId;
 
     set({
       profiles,
       activeProfileId:
         activeProfileId && profiles.some((profile) => profile.profileId === activeProfileId)
           ? activeProfileId
-          : profiles[0]?.profileId,
+          : keyboardProfileId ?? profiles[0]?.profileId,
     });
   },
 
   saveProfile: async (profile: ControllerProfile) => {
-    await db.profiles.put(profile);
-    await get().loadProfiles(profile.romHash);
-    set({ activeProfileId: profile.profileId });
+    const normalizedProfile = normalizeGlobalProfile(profile);
+    await db.profiles.put(normalizedProfile);
+    try {
+      await upsertSharedControllerProfiles([normalizedProfile]);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown profile sync error.';
+      console.warn(`Unable to persist profile to shared store: ${message}`);
+    }
+    await get().loadProfiles();
+    set({ activeProfileId: normalizedProfile.profileId });
   },
 
   removeProfile: async (profileId: string) => {
     await db.profiles.delete(profileId);
+    try {
+      await deleteSharedControllerProfile(profileId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown profile sync error.';
+      console.warn(`Unable to delete profile from shared store: ${message}`);
+    }
     await get().loadProfiles();
   },
 

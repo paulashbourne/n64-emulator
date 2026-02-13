@@ -16,6 +16,8 @@ A browser-based N64 emulator app scaffold with:
 - Favorites workflow (favorite/unfavorite, favorites-only filter, favorites-first sort)
 - Library view preferences persist (sort mode and favorites-only filter)
 - One-click controller keyboard preset in the mapping wizard
+- Built-in controller presets for Nintendo Switch, Xbox Series X|S, Backbone, and 8BitDo 64 controllers
+- Shared controller profile sync (global across clients) with coordinator-side JSON persistence
 - Keyboard shortcuts on play screen: `Space` pause/resume, `R` reset, `M` open mapper, `O` menu, `H` HUD, `Y` host stabilize viewers, `Esc` close overlays
 - Immersive play HUD controls: instant hide/show (`H`) and optional auto-hide while running
 - Online session MVP: host/join via invite code with up to 4 player slots and live remote input relay into player 2-4
@@ -73,6 +75,12 @@ For online multiplayer flows in local development, run the coordinator server to
 npm run dev:multiplayer
 ```
 
+Optional backend profile-store path override:
+
+```bash
+MULTIPLAYER_PROFILE_STORE_PATH=/path/to/controller-profiles.json npm run dev:multiplayer
+```
+
 Optional for production multiplayer reliability, configure custom ICE servers (including TURN) in `.env`:
 
 ```bash
@@ -90,6 +98,41 @@ VITE_MULTIPLAYER_ICE_SERVERS='[{"urls":["stun:stun.l.google.com:19302"]},{"urls"
 - `npm run coverage` - run tests with coverage output
 - `npm run sync:emulatorjs` - refresh local EmulatorJS runtime/core assets
 - `npm run sync:covers` - rebuild `src/roms/n64CoverInventory.ts` from libretro cover metadata
+- `scripts/deploy-frontend.sh` - build + sync frontend to S3 and invalidate CloudFront
+- `scripts/build-backend-artifact.sh` - package multiplayer coordinator runtime artifact
+- `scripts/deploy-backend.sh` - upload backend artifact and deploy to EC2 via SSM
+
+## Production deployment (AWS)
+
+Terraform infrastructure lives in:
+
+- `/Users/paul/git/paulashbourne/infra/services/n64`
+
+After applying Terraform, use its outputs to deploy app code:
+
+```bash
+# 1) Deploy frontend
+./scripts/deploy-frontend.sh \
+  --bucket <frontend_bucket_name> \
+  --distribution-id <cloudfront_distribution_id> \
+  --region us-east-1
+
+# 2) Deploy backend coordinator
+./scripts/deploy-backend.sh \
+  --bucket <artifact_bucket_name> \
+  --instance-id <coordinator_instance_id> \
+  --region us-east-1
+```
+
+Optional:
+
+```bash
+# Force full CloudFront cache invalidation
+./scripts/deploy-frontend.sh \
+  --bucket <frontend_bucket_name> \
+  --distribution-id <cloudfront_distribution_id> \
+  --full-invalidation
+```
 
 ## E2E smoke test
 
@@ -133,6 +176,7 @@ npm run test:e2e -- e2e/play-hud-immersive.smoke.spec.ts
 - Host creates a session and shares a 6-character invite code.
 - Joiners claim the first open slot (`Player 2` through `Player 4`).
 - Coordinator tracks room membership and relays remote controller input messages to host.
+- Coordinator stores shared controller profiles and serves them at `/api/controller-profiles` so profile edits made on one client are available to everyone.
 - Host Play page consumes relayed remote inputs using EmulatorJS `simulateInput` and maps slots to controller ports.
 - Joiners can send controller events from on-screen quick inputs, keyboard press/release mapping, or supported gamepad buttons.
 - Any connected player can send room chat messages to all other members.
@@ -148,12 +192,16 @@ npm run test:e2e -- e2e/play-hud-immersive.smoke.spec.ts
 
 ## Data storage
 
-All local state is stored in IndexedDB via Dexie:
+Client local state is stored in IndexedDB via Dexie:
 
 - ROM catalog metadata and handles
 - Imported ROM binaries
-- Controller profiles
+- Controller profiles (cached locally, synchronized with shared coordinator store when multiplayer API is available)
 - Per-ROM save blobs keyed by ROM hash
+
+Shared controller profiles are also persisted server-side by the multiplayer coordinator at:
+
+- `MULTIPLAYER_PROFILE_STORE_PATH` (default: `./.runtime/controller-profiles.json`)
 
 ## Testing
 

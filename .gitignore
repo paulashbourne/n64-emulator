@@ -13,6 +13,8 @@ dist-ssr
 *.local
 test-results
 playwright-report
+artifacts/releases
+.runtime
 
 # Editor directories and files
 .vscode/*

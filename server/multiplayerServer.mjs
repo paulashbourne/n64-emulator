@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
+import { dirname } from 'node:path';
 import { URL } from 'node:url';
 import { WebSocketServer } from 'ws';
 
@@ -13,6 +15,30 @@ const STREAM_RESYNC_COOLDOWN_MS = 1_000;
 const MAX_CHAT_MESSAGES = 60;
 const INVITE_CODE_LENGTH = 6;
 const INVITE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const CONTROLLER_PROFILE_STORE_PATH =
+  process.env.MULTIPLAYER_PROFILE_STORE_PATH ?? './.runtime/controller-profiles.json';
+const CONTROLLER_PROFILE_TARGETS = [
+  'a',
+  'b',
+  'z',
+  'start',
+  'l',
+  'r',
+  'dpad_up',
+  'dpad_down',
+  'dpad_left',
+  'dpad_right',
+  'c_up',
+  'c_down',
+  'c_left',
+  'c_right',
+  'analog_left',
+  'analog_right',
+  'analog_up',
+  'analog_down',
+];
+const CONTROLLER_PROFILE_TARGET_SET = new Set(CONTROLLER_PROFILE_TARGETS);
+const INPUT_SOURCES = new Set(['keyboard', 'gamepad_button', 'gamepad_axis']);
 
 /**
  * @typedef {{
@@ -55,12 +81,34 @@ const INVITE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
  * }} SessionRecord
  */
 
+/**
+ * @typedef {{
+ *   profileId: string;
+ *   name: string;
+ *   deviceId: string;
+ *   deadzone: number;
+ *   bindings: Record<string, {
+ *     source: 'keyboard' | 'gamepad_button' | 'gamepad_axis';
+ *     code?: string;
+ *     index?: number;
+ *     gamepadIndex?: number;
+ *     deviceId?: string;
+ *     direction?: 'negative' | 'positive';
+ *     threshold?: number;
+ *   }>;
+ *   updatedAt: number;
+ * }} SharedControllerProfile
+ */
+
 /** @type {Map<string, SessionRecord>} */
 const sessions = new Map();
+/** @type {Map<string, SharedControllerProfile>} */
+const sharedControllerProfiles = new Map();
+let profileStoreWritePromise = Promise.resolve();
 
 function withCors(res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 }
 
@@ -81,6 +129,172 @@ async function readJsonBody(req) {
   }
   const raw = Buffer.concat(chunks).toString('utf8');
   return JSON.parse(raw);
+}
+
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function sanitizeControllerBinding(rawBinding) {
+  if (!rawBinding || typeof rawBinding !== 'object' || !INPUT_SOURCES.has(rawBinding.source)) {
+    return null;
+  }
+
+  /** @type {SharedControllerProfile['bindings'][string]} */
+  const sanitized = {
+    source: rawBinding.source,
+  };
+
+  if (typeof rawBinding.index === 'number' && Number.isInteger(rawBinding.index) && rawBinding.index >= 0) {
+    sanitized.index = rawBinding.index;
+  }
+  if (typeof rawBinding.gamepadIndex === 'number' && Number.isInteger(rawBinding.gamepadIndex) && rawBinding.gamepadIndex >= 0) {
+    sanitized.gamepadIndex = rawBinding.gamepadIndex;
+  }
+  if (typeof rawBinding.deviceId === 'string') {
+    const deviceId = rawBinding.deviceId.trim().slice(0, 200);
+    if (deviceId) {
+      sanitized.deviceId = deviceId;
+    }
+  }
+
+  if (rawBinding.source === 'keyboard') {
+    if (typeof rawBinding.code !== 'string') {
+      return null;
+    }
+    const code = rawBinding.code.trim().slice(0, 64);
+    if (!code) {
+      return null;
+    }
+    sanitized.code = code;
+    return sanitized;
+  }
+
+  if (rawBinding.source === 'gamepad_button') {
+    if (sanitized.index === undefined) {
+      return null;
+    }
+    return sanitized;
+  }
+
+  if (sanitized.index === undefined) {
+    return null;
+  }
+  if (rawBinding.direction === 'negative' || rawBinding.direction === 'positive') {
+    sanitized.direction = rawBinding.direction;
+  } else {
+    return null;
+  }
+  if (typeof rawBinding.threshold === 'number' && Number.isFinite(rawBinding.threshold)) {
+    sanitized.threshold = clamp(rawBinding.threshold, 0, 0.95);
+  }
+  return sanitized;
+}
+
+function sanitizeControllerProfile(rawProfile) {
+  if (!rawProfile || typeof rawProfile !== 'object') {
+    return null;
+  }
+
+  const profileId = typeof rawProfile.profileId === 'string' ? rawProfile.profileId.trim().slice(0, 128) : '';
+  if (!profileId) {
+    return null;
+  }
+
+  const nameInput = typeof rawProfile.name === 'string' ? rawProfile.name : '';
+  const deviceInput = typeof rawProfile.deviceId === 'string' ? rawProfile.deviceId : '';
+  const rawDeadzone = typeof rawProfile.deadzone === 'number' && Number.isFinite(rawProfile.deadzone) ? rawProfile.deadzone : 0.2;
+  const updatedAt = typeof rawProfile.updatedAt === 'number' && Number.isFinite(rawProfile.updatedAt)
+    ? Math.round(rawProfile.updatedAt)
+    : Date.now();
+
+  /** @type {SharedControllerProfile['bindings']} */
+  const bindings = {};
+  const rawBindings = rawProfile.bindings && typeof rawProfile.bindings === 'object' ? rawProfile.bindings : {};
+  for (const [target, rawBinding] of Object.entries(rawBindings)) {
+    if (!CONTROLLER_PROFILE_TARGET_SET.has(target)) {
+      continue;
+    }
+    const sanitizedBinding = sanitizeControllerBinding(rawBinding);
+    if (!sanitizedBinding) {
+      continue;
+    }
+    bindings[target] = sanitizedBinding;
+  }
+
+  return {
+    profileId,
+    name: sanitizeName(nameInput, 'Controller Profile'),
+    deviceId: sanitizeName(deviceInput, 'gamepad-generic'),
+    deadzone: clamp(rawDeadzone, 0, 0.95),
+    bindings,
+    updatedAt,
+  };
+}
+
+function listSharedProfiles() {
+  return [...sharedControllerProfiles.values()].sort((left, right) => {
+    if (right.updatedAt !== left.updatedAt) {
+      return right.updatedAt - left.updatedAt;
+    }
+    return left.profileId.localeCompare(right.profileId);
+  });
+}
+
+async function persistSharedProfilesToDisk() {
+  const directory = dirname(CONTROLLER_PROFILE_STORE_PATH);
+  const payload = JSON.stringify(
+    {
+      updatedAt: Date.now(),
+      profiles: listSharedProfiles(),
+    },
+    null,
+    2,
+  );
+
+  await mkdir(directory, { recursive: true });
+  await writeFile(CONTROLLER_PROFILE_STORE_PATH, payload, 'utf8');
+}
+
+async function queueProfilePersist() {
+  profileStoreWritePromise = profileStoreWritePromise
+    .then(() => persistSharedProfilesToDisk())
+    .catch((error) => {
+      console.error(`Failed to persist controller profiles at ${CONTROLLER_PROFILE_STORE_PATH}:`, error);
+    });
+  await profileStoreWritePromise;
+}
+
+async function loadSharedProfilesFromDisk() {
+  try {
+    const raw = await readFile(CONTROLLER_PROFILE_STORE_PATH, 'utf8');
+    const parsed = JSON.parse(raw);
+    const profiles = Array.isArray(parsed?.profiles) ? parsed.profiles : [];
+    for (const rawProfile of profiles) {
+      const sanitized = sanitizeControllerProfile(rawProfile);
+      if (!sanitized) {
+        continue;
+      }
+      sharedControllerProfiles.set(sanitized.profileId, sanitized);
+    }
+  } catch (error) {
+    if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') {
+      return;
+    }
+    console.error('Unable to load shared controller profiles:', error);
+  }
+}
+
+function parseControllerProfileId(pathname) {
+  const match = pathname.match(/^\/api\/controller-profiles\/(.+)$/);
+  if (!match) {
+    return null;
+  }
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return null;
+  }
 }
 
 function sanitizeName(value, fallback) {
@@ -713,6 +927,62 @@ const httpServer = createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === 'GET' && pathname === '/api/controller-profiles') {
+    sendJson(res, 200, { profiles: listSharedProfiles() });
+    return;
+  }
+
+  if (req.method === 'PUT' && pathname === '/api/controller-profiles') {
+    try {
+      const body = await readJsonBody(req);
+      const rawProfiles = Array.isArray(body?.profiles)
+        ? body.profiles
+        : body?.profile
+          ? [body.profile]
+          : [];
+
+      let updated = 0;
+      for (const rawProfile of rawProfiles) {
+        const profile = sanitizeControllerProfile(rawProfile);
+        if (!profile) {
+          continue;
+        }
+
+        const existing = sharedControllerProfiles.get(profile.profileId);
+        if (!existing || profile.updatedAt >= existing.updatedAt) {
+          sharedControllerProfiles.set(profile.profileId, profile);
+          updated += 1;
+        }
+      }
+
+      if (updated > 0) {
+        await queueProfilePersist();
+      }
+
+      sendJson(res, 200, { profiles: listSharedProfiles(), updated });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Invalid profile payload.';
+      sendJson(res, 400, { error: message });
+    }
+    return;
+  }
+
+  if (req.method === 'DELETE' && pathname.startsWith('/api/controller-profiles/')) {
+    const profileId = parseControllerProfileId(pathname);
+    if (!profileId) {
+      sendJson(res, 400, { error: 'Invalid profile id.' });
+      return;
+    }
+
+    const deleted = sharedControllerProfiles.delete(profileId);
+    if (deleted) {
+      await queueProfilePersist();
+    }
+
+    sendJson(res, 200, { deleted });
+    return;
+  }
+
   if (req.method === 'POST' && pathname === '/api/multiplayer/sessions') {
     try {
       const body = await readJsonBody(req);
@@ -1002,6 +1272,9 @@ httpServer.on('upgrade', (req, socket, head) => {
   });
   });
 });
+
+await loadSharedProfilesFromDisk();
+console.log(`Loaded ${sharedControllerProfiles.size} shared controller profile(s) from ${CONTROLLER_PROFILE_STORE_PATH}.`);
 
 httpServer.listen(PORT, HOST, () => {
   console.log(`Multiplayer coordinator listening at http://${HOST}:${PORT}`);

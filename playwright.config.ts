@@ -2,6 +2,15 @@ import { defineConfig } from '@playwright/test';
 
 const fixedBaseUrl = process.env.E2E_BASE_URL;
 const baseUrl = fixedBaseUrl ?? 'http://127.0.0.1:5173';
+const basicAuthUsername = process.env.E2E_BASIC_AUTH_USER;
+const basicAuthPassword = process.env.E2E_BASIC_AUTH_PASSWORD;
+const httpCredentials =
+  basicAuthPassword
+    ? {
+        username: basicAuthUsername ?? '',
+        password: basicAuthPassword,
+      }
+    : undefined;
 
 export default defineConfig({
   testDir: './e2e',
@@ -10,6 +19,7 @@ export default defineConfig({
   workers: 1,
   use: {
     baseURL: baseUrl,
+    httpCredentials,
     headless: true,
     launchOptions: {
       args: ['--use-angle=swiftshader', '--ignore-gpu-blocklist', '--enable-webgl'],
