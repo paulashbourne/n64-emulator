@@ -1,5 +1,5 @@
 import type { N64ControlTarget } from '../types/input';
-import type { MultiplayerDigitalInputPayload } from '../types/multiplayer';
+import type { MultiplayerAnalogInputPayload, MultiplayerDigitalInputPayload } from '../types/multiplayer';
 
 export const JOINER_KEY_TO_CONTROL: Record<string, N64ControlTarget> = {
   KeyX: 'a',
@@ -40,6 +40,18 @@ export function buildDigitalInputPayload(control: N64ControlTarget, pressed: boo
     kind: 'digital',
     control,
     pressed,
+  };
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+export function buildAnalogInputPayload(x: number, y: number): MultiplayerAnalogInputPayload {
+  return {
+    kind: 'analog',
+    x: clamp(x, -1, 1),
+    y: clamp(y, -1, 1),
   };
 }
 

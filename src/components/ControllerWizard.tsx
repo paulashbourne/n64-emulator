@@ -17,9 +17,12 @@ import {
 import { bindingToLabel, captureNextInput, controlPrompt } from '../input/inputService';
 import type { ControllerProfile } from '../types/input';
 
+type ControllerWizardSaveMode = 'create' | 'edit';
+
 interface ControllerWizardProps {
   romHash?: string;
   initialProfile?: ControllerProfile;
+  saveMode?: ControllerWizardSaveMode;
   onCancel: () => void;
   onComplete: (profile: ControllerProfile) => Promise<void>;
 }
@@ -34,7 +37,14 @@ function resolveDeviceId(state: MappingWizardState, fallback?: string): string {
   return fallback ?? 'keyboard-generic';
 }
 
-export function ControllerWizard({ romHash, initialProfile, onCancel, onComplete }: ControllerWizardProps) {
+export function ControllerWizard({
+  romHash,
+  initialProfile,
+  saveMode,
+  onCancel,
+  onComplete,
+}: ControllerWizardProps) {
+  const effectiveSaveMode: ControllerWizardSaveMode = saveMode ?? (initialProfile ? 'edit' : 'create');
   const [wizardState, setWizardState] = useState<MappingWizardState>(
     createInitialWizardState(initialProfile?.bindings),
   );
@@ -96,7 +106,10 @@ export function ControllerWizard({ romHash, initialProfile, onCancel, onComplete
 
     try {
       const profile: ControllerProfile = {
-        profileId: initialProfile?.profileId ?? `profile:${crypto.randomUUID()}`,
+        profileId:
+          effectiveSaveMode === 'edit' && initialProfile
+            ? initialProfile.profileId
+            : `profile:${crypto.randomUUID()}`,
         name: profileName.trim() || 'Controller Profile',
         deviceId: resolveDeviceId(wizardState, initialProfile?.deviceId),
         romHash,
@@ -117,7 +130,7 @@ export function ControllerWizard({ romHash, initialProfile, onCancel, onComplete
   return (
     <section className="panel wizard-panel" aria-label="Controller mapping wizard">
       <header className="wizard-header">
-        <h2>Controller Mapping Wizard</h2>
+        <h2>{effectiveSaveMode === 'edit' ? 'Edit Controller Profile' : 'Controller Mapping Wizard'}</h2>
         <p>Step through each N64 control and press the input you want to map.</p>
         <div className="wizard-actions wizard-preset-row">
           <button type="button" className="preset-button" onClick={onApplyKeyboardPreset} disabled={isCapturing || isSaving}>
@@ -157,6 +170,14 @@ export function ControllerWizard({ romHash, initialProfile, onCancel, onComplete
             <>
               <h3>All controls reviewed</h3>
               <p>You can now save this profile.</p>
+              <div className="wizard-actions">
+                <button type="button" onClick={onBack} disabled={isCapturing || isSaving || wizardState.stepIndex === 0}>
+                  Back
+                </button>
+                <button type="button" onClick={onReset} disabled={isCapturing || isSaving}>
+                  Reset
+                </button>
+              </div>
             </>
           )}
         </div>
@@ -201,7 +222,7 @@ export function ControllerWizard({ romHash, initialProfile, onCancel, onComplete
 
         <div className="wizard-actions">
           <button type="submit" disabled={!complete || isSaving || isCapturing}>
-            {isSaving ? 'Saving…' : 'Save Profile'}
+            {isSaving ? 'Saving…' : effectiveSaveMode === 'edit' ? 'Update Profile' : 'Save Profile'}
           </button>
           <button type="button" onClick={onCancel} disabled={isSaving || isCapturing}>
             Close

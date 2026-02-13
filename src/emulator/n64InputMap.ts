@@ -1,5 +1,7 @@
 import type { N64ControlTarget } from '../types/input';
 
+export const N64_ANALOG_MAX_VALUE = 0x7fff;
+
 export const N64_TARGET_TO_INPUT_INDEX: Record<N64ControlTarget, number> = {
   a: 0,
   b: 1,

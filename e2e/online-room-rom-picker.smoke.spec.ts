@@ -36,7 +36,7 @@ test('host can set room rom from session page and joiners see it', async ({ page
   await page.getByLabel('Selected ROM').selectOption({ label: 'ROOM HOST ROM' });
   await page.getByRole('button', { name: 'Set Room ROM' }).click();
   await expect(page.getByText('Host ROM: ROOM HOST ROM')).toBeVisible({ timeout: 15_000 });
-  await expect(page.getByRole('link', { name: 'Launch Host ROM' })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole('button', { name: 'Launch Host ROM' })).toBeVisible({ timeout: 15_000 });
 
   const guestContext = await browser.newContext();
   const guestPage = await guestContext.newPage();

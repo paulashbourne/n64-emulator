@@ -7,6 +7,7 @@ import type {
   RomHandleRecord,
   RomRecord,
 } from '../types/rom';
+import type { SaveSlotRecord } from '../types/save';
 
 export interface SaveRecord {
   key: string;
@@ -28,6 +29,7 @@ class AppDatabase extends Dexie {
   directories!: Table<DirectoryRecord, string>;
   profiles!: Table<ControllerProfile, string>;
   saves!: Table<SaveRecord, string>;
+  saveSlots!: Table<SaveSlotRecord, string>;
   settings!: Table<AppSettingRecord, string>;
 
   constructor() {
@@ -63,6 +65,17 @@ class AppDatabase extends Dexie {
             }
           });
       });
+
+    this.version(3).stores({
+      roms: '&id,hash,title,lastPlayed,directoryId,source,favorite',
+      romHandles: '&id,romId,directoryId,relativePath',
+      romBinaries: '&romId,updatedAt',
+      directories: '&id,name,lastIndexedAt',
+      profiles: '&profileId,deviceId,romHash,updatedAt',
+      saves: '&key,romHash,updatedAt',
+      saveSlots: '&slotId,gameKey,updatedAt,lastSavedAt,lastPlayedAt',
+      settings: '&key,updatedAt',
+    });
   }
 }
 
@@ -71,7 +84,7 @@ export const db = new AppDatabase();
 export async function clearIndexedData(): Promise<void> {
   await db.transaction(
     'rw',
-    [db.roms, db.romHandles, db.romBinaries, db.directories, db.profiles, db.saves, db.settings],
+    [db.roms, db.romHandles, db.romBinaries, db.directories, db.profiles, db.saves, db.saveSlots, db.settings],
     async () => {
       await db.roms.clear();
       await db.romHandles.clear();
@@ -79,6 +92,7 @@ export async function clearIndexedData(): Promise<void> {
       await db.directories.clear();
       await db.profiles.clear();
       await db.saves.clear();
+      await db.saveSlots.clear();
       await db.settings.clear();
     },
   );

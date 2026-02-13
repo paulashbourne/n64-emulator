@@ -23,9 +23,10 @@ test('host can create an invite code and a second player can join', async ({ pag
   await expect(guestPage.getByText('You are Player 2')).toBeVisible({ timeout: 15_000 });
   await expect(page.getByText(/Player 2:\s*GuestTwo/)).toBeVisible({ timeout: 15_000 });
 
-  await guestPage.getByRole('button', { name: 'A', exact: true }).click();
-  await expect(page.getByText('Player 2 (GuestTwo)')).toBeVisible({ timeout: 15_000 });
-  await expect(page.getByText('a down')).toBeVisible({ timeout: 15_000 });
+  const chatMessage = `join-check-${Date.now()}`;
+  await guestPage.getByPlaceholder('Type a message for everyone in this room…').fill(chatMessage);
+  await guestPage.getByRole('button', { name: 'Send' }).click();
+  await expect(page.getByText(chatMessage)).toBeVisible({ timeout: 15_000 });
 
   await guestContext.close();
 });

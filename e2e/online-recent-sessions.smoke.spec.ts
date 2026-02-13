@@ -20,8 +20,9 @@ test('recent sessions appear after creating a host session and can be reopened',
   await page
     .locator('.recent-session-list li')
     .filter({ hasText: inviteCode })
-    .getByRole('link', { name: 'Reopen' })
+    .getByRole('button', { name: 'Reopen' })
     .click();
 
   await expect(page.getByRole('heading', { name: `Online Session ${inviteCode}` })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByText('You are Player 1 (Host)')).toBeVisible({ timeout: 15_000 });
 });

@@ -9,6 +9,7 @@ const MAX_PLAYERS = 4;
 const HOST_RECONNECT_GRACE_MS = 120_000;
 const MEMBER_RECONNECT_GRACE_MS = 20_000;
 const CHAT_COOLDOWN_MS = 250;
+const STREAM_RESYNC_COOLDOWN_MS = 1_000;
 const MAX_CHAT_MESSAGES = 60;
 const INVITE_CODE_LENGTH = 6;
 const INVITE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -17,11 +18,16 @@ const INVITE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
  * @typedef {{
  *   clientId: string;
  *   name: string;
+ *   avatarUrl?: string;
  *   slot: number;
  *   isHost: boolean;
  *   connected: boolean;
+ *   ready: boolean;
+ *   pingMs?: number;
  *   joinedAt: number;
  *   lastChatAt?: number;
+ *   lastStreamResyncAt?: number;
+ *   lastLatencyBroadcastAt?: number;
  *   disconnectTimer?: NodeJS.Timeout;
  *   socket?: import('ws').WebSocket;
  * }} SessionMember
@@ -32,6 +38,8 @@ const INVITE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
  *   code: string;
  *   createdAt: number;
  *   hostClientId: string;
+ *   joinLocked: boolean;
+ *   mutedInputClientIds: Set<string>;
  *   romId?: string;
  *   romTitle?: string;
  *   chat: Array<{
@@ -83,12 +91,37 @@ function sanitizeName(value, fallback) {
   return clean.length > 0 ? clean : fallback;
 }
 
+function sanitizeAvatarUrl(value) {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+
+  const clean = value.trim().slice(0, 500);
+  if (!clean) {
+    return undefined;
+  }
+
+  if (clean.startsWith('http://') || clean.startsWith('https://') || clean.startsWith('data:image/')) {
+    return clean;
+  }
+
+  return undefined;
+}
+
 function sanitizeChatMessage(value) {
   if (typeof value !== 'string') {
     return '';
   }
 
   return value.replace(/\s+/g, ' ').trim().slice(0, 280);
+}
+
+function sanitizeQualityHintReason(value) {
+  if (typeof value !== 'string') {
+    return '';
+  }
+
+  return value.replace(/\s+/g, ' ').trim().slice(0, 180);
 }
 
 function sanitizeWebRtcSignalPayload(payload) {
@@ -160,9 +193,12 @@ function publicMember(member) {
   return {
     clientId: member.clientId,
     name: member.name,
+    avatarUrl: member.avatarUrl,
     slot: member.slot,
     isHost: member.isHost,
     connected: member.connected,
+    ready: member.ready,
+    pingMs: member.pingMs,
     joinedAt: member.joinedAt,
   };
 }
@@ -172,6 +208,8 @@ function publicSession(session) {
     code: session.code,
     createdAt: session.createdAt,
     hostClientId: session.hostClientId,
+    joinLocked: session.joinLocked,
+    mutedInputClientIds: [...session.mutedInputClientIds.values()],
     romId: session.romId,
     romTitle: session.romTitle,
     chat: session.chat,
@@ -196,6 +234,38 @@ function broadcastRoomState(session) {
   broadcastToConnectedMembers(session, payload);
 }
 
+function broadcastMemberLatency(session, member) {
+  const payload = JSON.stringify({
+    type: 'member_latency',
+    clientId: member.clientId,
+    pingMs: member.pingMs,
+    at: Date.now(),
+  });
+  broadcastToConnectedMembers(session, payload);
+}
+
+function sendRemoteInputResetToHost(session, sourceMember, reason) {
+  if (sourceMember.isHost) {
+    return;
+  }
+
+  const hostMember = session.members.get(session.hostClientId);
+  if (!hostMember?.socket || hostMember.socket.readyState !== hostMember.socket.OPEN) {
+    return;
+  }
+
+  hostMember.socket.send(
+    JSON.stringify({
+      type: 'remote_input_reset',
+      fromClientId: sourceMember.clientId,
+      fromName: sourceMember.name,
+      fromSlot: sourceMember.slot,
+      reason,
+      at: Date.now(),
+    }),
+  );
+}
+
 function broadcastChatEntry(session, entry) {
   const payload = JSON.stringify({
     type: 'chat',
@@ -212,6 +282,15 @@ function findOpenPlayerSlot(session) {
     }
   }
   return null;
+}
+
+function findMemberBySlot(session, slot) {
+  for (const sessionMember of session.members.values()) {
+    if (sessionMember.slot === slot) {
+      return sessionMember;
+    }
+  }
+  return undefined;
 }
 
 function parseSessionCodeFromPath(pathname) {
@@ -236,6 +315,18 @@ function handleWsMessage(session, member, rawMessage) {
   }
 
   if (message.type === 'ping') {
+    const sentAt = Number(message.sentAt);
+    if (Number.isFinite(sentAt)) {
+      const pingMs = Math.max(1, Math.min(2_000, Date.now() - sentAt));
+      const previousPing = member.pingMs;
+      member.pingMs = pingMs;
+      const latencyDelta = previousPing === undefined ? pingMs : Math.abs(previousPing - pingMs);
+      if (previousPing === undefined || latencyDelta >= 12 || Date.now() - (member.lastLatencyBroadcastAt ?? 0) > 8_000) {
+        member.lastLatencyBroadcastAt = Date.now();
+        broadcastMemberLatency(session, member);
+      }
+    }
+
     member.socket?.send(JSON.stringify({ type: 'pong', at: Date.now() }));
     return;
   }
@@ -247,6 +338,79 @@ function handleWsMessage(session, member, rawMessage) {
     if ('romTitle' in message) {
       session.romTitle = typeof message.romTitle === 'string' ? message.romTitle : undefined;
     }
+    for (const sessionMember of session.members.values()) {
+      sessionMember.ready = false;
+    }
+    broadcastRoomState(session);
+    return;
+  }
+
+  if (message.type === 'set_ready') {
+    member.ready = Boolean(message.ready);
+    broadcastRoomState(session);
+    return;
+  }
+
+  if (message.type === 'set_join_lock' && member.isHost) {
+    session.joinLocked = Boolean(message.locked);
+    broadcastRoomState(session);
+    return;
+  }
+
+  if (message.type === 'set_input_mute' && member.isHost) {
+    const targetClientId = typeof message.targetClientId === 'string' ? message.targetClientId : '';
+    const muted = Boolean(message.muted);
+    if (!targetClientId) {
+      return;
+    }
+
+    const targetMember = session.members.get(targetClientId);
+    if (!targetMember || targetMember.isHost) {
+      return;
+    }
+
+    if (muted) {
+      if (!session.mutedInputClientIds.has(targetClientId)) {
+        sendRemoteInputResetToHost(session, targetMember, 'muted');
+      }
+      session.mutedInputClientIds.add(targetClientId);
+    } else {
+      session.mutedInputClientIds.delete(targetClientId);
+    }
+    broadcastRoomState(session);
+    return;
+  }
+
+  if (message.type === 'set_slot' && member.isHost) {
+    const targetClientId = typeof message.targetClientId === 'string' ? message.targetClientId : '';
+    const requestedSlot = Number(message.slot);
+    if (!targetClientId || !Number.isInteger(requestedSlot) || requestedSlot < 2 || requestedSlot > MAX_PLAYERS) {
+      return;
+    }
+
+    const targetMember = session.members.get(targetClientId);
+    if (!targetMember || targetMember.isHost) {
+      return;
+    }
+
+    const originalSlot = targetMember.slot;
+    if (originalSlot === requestedSlot) {
+      return;
+    }
+
+    const occupant = findMemberBySlot(session, requestedSlot);
+    if (occupant && occupant.clientId !== targetMember.clientId) {
+      if (occupant.isHost) {
+        return;
+      }
+      sendRemoteInputResetToHost(session, occupant, 'slot_changed');
+      occupant.slot = originalSlot;
+      occupant.ready = false;
+    }
+
+    sendRemoteInputResetToHost(session, targetMember, 'slot_changed');
+    targetMember.slot = requestedSlot;
+    targetMember.ready = false;
     broadcastRoomState(session);
     return;
   }
@@ -257,6 +421,20 @@ function handleWsMessage(session, member, rawMessage) {
       return;
     }
 
+    if (session.mutedInputClientIds.has(member.clientId)) {
+      hostMember.socket.send(
+        JSON.stringify({
+          type: 'input_blocked',
+          fromClientId: member.clientId,
+          fromName: member.name,
+          fromSlot: member.slot,
+          payload: message.payload ?? null,
+          at: Date.now(),
+        }),
+      );
+      return;
+    }
+
     hostMember.socket.send(
       JSON.stringify({
         type: 'remote_input',
@@ -264,6 +442,38 @@ function handleWsMessage(session, member, rawMessage) {
         fromName: member.name,
         fromSlot: member.slot,
         payload: message.payload ?? null,
+        at: Date.now(),
+      }),
+    );
+    return;
+  }
+
+  if (message.type === 'quality_hint' && !member.isHost) {
+    const hostMember = session.members.get(session.hostClientId);
+    if (!hostMember?.socket || hostMember.socket.readyState !== hostMember.socket.OPEN) {
+      return;
+    }
+
+    const requestedPreset =
+      message.requestedPreset === 'ultra_low_latency' ||
+      message.requestedPreset === 'balanced' ||
+      message.requestedPreset === 'quality'
+        ? message.requestedPreset
+        : null;
+    if (!requestedPreset) {
+      return;
+    }
+
+    const reason = sanitizeQualityHintReason(message.reason);
+
+    hostMember.socket.send(
+      JSON.stringify({
+        type: 'quality_hint',
+        fromClientId: member.clientId,
+        fromName: member.name,
+        fromSlot: member.slot,
+        requestedPreset,
+        reason: reason || undefined,
         at: Date.now(),
       }),
     );
@@ -329,6 +539,30 @@ function handleWsMessage(session, member, rawMessage) {
         at: Date.now(),
       }),
     );
+    return;
+  }
+
+  if (message.type === 'stream_resync_request' && !member.isHost) {
+    const now = Date.now();
+    if (member.lastStreamResyncAt && now - member.lastStreamResyncAt < STREAM_RESYNC_COOLDOWN_MS) {
+      return;
+    }
+    member.lastStreamResyncAt = now;
+
+    const hostMember = session.members.get(session.hostClientId);
+    if (!hostMember?.socket || hostMember.socket.readyState !== hostMember.socket.OPEN) {
+      return;
+    }
+
+    hostMember.socket.send(
+      JSON.stringify({
+        type: 'stream_resync_request',
+        fromClientId: member.clientId,
+        fromName: member.name,
+        fromSlot: member.slot,
+        at: now,
+      }),
+    );
   }
 }
 
@@ -368,6 +602,8 @@ function removeMember(session, member, options = {}) {
     member.disconnectTimer = undefined;
   }
 
+  sendRemoteInputResetToHost(session, member, 'member_removed');
+
   if (kickedReason) {
     sendMemberKicked(member, byName, kickedReason);
   }
@@ -378,6 +614,7 @@ function removeMember(session, member, options = {}) {
 
   member.connected = false;
   member.socket = undefined;
+  session.mutedInputClientIds.delete(member.clientId);
   session.members.delete(member.clientId);
 }
 
@@ -446,6 +683,7 @@ function scheduleMemberRemovalIfNotReconnected(session, member) {
     if (member.socket || member.connected || member.isHost) {
       return;
     }
+    session.mutedInputClientIds.delete(member.clientId);
     session.members.delete(member.clientId);
     broadcastRoomState(session);
   }, MEMBER_RECONNECT_GRACE_MS);
@@ -479,6 +717,7 @@ const httpServer = createServer(async (req, res) => {
     try {
       const body = await readJsonBody(req);
       const hostName = sanitizeName(body.hostName, 'Host');
+      const hostAvatarUrl = sanitizeAvatarUrl(body.avatarUrl);
       const code = createUniqueInviteCode();
       const hostClientId = randomUUID();
       const createdAt = Date.now();
@@ -488,6 +727,8 @@ const httpServer = createServer(async (req, res) => {
         code,
         createdAt,
         hostClientId,
+        joinLocked: false,
+        mutedInputClientIds: new Set(),
         romId: typeof body.romId === 'string' ? body.romId : undefined,
         romTitle: typeof body.romTitle === 'string' ? body.romTitle : undefined,
         chat: [],
@@ -497,9 +738,11 @@ const httpServer = createServer(async (req, res) => {
       session.members.set(hostClientId, {
         clientId: hostClientId,
         name: hostName,
+        avatarUrl: hostAvatarUrl,
         slot: 1,
         isHost: true,
         connected: false,
+        ready: false,
         joinedAt: createdAt,
       });
 
@@ -530,6 +773,11 @@ const httpServer = createServer(async (req, res) => {
       return;
     }
 
+    if (session.joinLocked) {
+      sendJson(res, 423, { error: 'This room is locked by the host. Ask the host to unlock joins.' });
+      return;
+    }
+
     const openSlot = findOpenPlayerSlot(session);
     if (!openSlot) {
       sendJson(res, 409, { error: 'Session is full (maximum 4 players).' });
@@ -539,14 +787,17 @@ const httpServer = createServer(async (req, res) => {
     try {
       const body = await readJsonBody(req);
       const name = sanitizeName(body.name, `Player ${openSlot}`);
+      const avatarUrl = sanitizeAvatarUrl(body.avatarUrl);
       const clientId = randomUUID();
 
       session.members.set(clientId, {
         clientId,
         name,
+        avatarUrl,
         slot: openSlot,
         isHost: false,
         connected: false,
+        ready: false,
         joinedAt: Date.now(),
       });
 
@@ -734,20 +985,21 @@ httpServer.on('upgrade', (req, socket, head) => {
         return;
       }
 
-      if (member.isHost) {
-        member.connected = false;
-        member.socket = undefined;
-        cancelMemberDisconnectTimer(member);
-        broadcastRoomState(session);
-        scheduleSessionCloseIfHostDoesNotReturn(session);
-        return;
-      }
-
+    if (member.isHost) {
       member.connected = false;
       member.socket = undefined;
+      cancelMemberDisconnectTimer(member);
       broadcastRoomState(session);
-      scheduleMemberRemovalIfNotReconnected(session, member);
-    });
+      scheduleSessionCloseIfHostDoesNotReturn(session);
+      return;
+    }
+
+    sendRemoteInputResetToHost(session, member, 'member_disconnected');
+    member.connected = false;
+    member.socket = undefined;
+    broadcastRoomState(session);
+    scheduleMemberRemovalIfNotReconnected(session, member);
+  });
   });
 });
 

@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "sync:emulatorjs": "node scripts/sync-emulatorjs-assets.mjs",
+    "sync:covers": "node scripts/build-n64-cover-inventory.mjs",
     "postinstall": "npm run sync:emulatorjs",
     "dev": "vite",
     "dev:multiplayer": "node server/multiplayerServer.mjs",

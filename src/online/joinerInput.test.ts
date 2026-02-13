@@ -1,5 +1,6 @@
 import {
   JOINER_KEY_TO_CONTROL,
+  buildAnalogInputPayload,
   buildDigitalInputPayload,
   getPressedControlsFromGamepad,
 } from './joinerInput';
@@ -17,6 +18,20 @@ describe('joiner input helpers', () => {
       kind: 'digital',
       control: 'start',
       pressed: true,
+    });
+  });
+
+  test('builds clamped analog payload', () => {
+    expect(buildAnalogInputPayload(0.25, -0.8)).toEqual({
+      kind: 'analog',
+      x: 0.25,
+      y: -0.8,
+    });
+
+    expect(buildAnalogInputPayload(5, -4)).toEqual({
+      kind: 'analog',
+      x: 1,
+      y: -1,
     });
   });
 

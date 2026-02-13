@@ -6,6 +6,7 @@ import {
   currentTarget,
   goBack,
   isWizardComplete,
+  mappingSummary,
   resetWizard,
   skipCurrentTarget,
   wizardProgress,
@@ -61,5 +62,21 @@ describe('mapping wizard state machine', () => {
     expect(first).not.toBe(second);
     expect(first.a?.code).toBe('KeyX');
     expect(second.a?.code).toBe('KeyX');
+  });
+
+  test('starts at first unmapped control when initial bindings are provided', () => {
+    const preset = createKeyboardPresetBindings();
+    const partialBindings = { ...preset };
+    delete partialBindings.c_left;
+    delete partialBindings.c_right;
+
+    const partiallyMapped = createInitialWizardState(partialBindings);
+    expect(currentTarget(partiallyMapped)).toBe('c_left');
+    expect(isWizardComplete(partiallyMapped)).toBe(false);
+
+    const fullyMapped = createInitialWizardState(preset);
+    expect(isWizardComplete(fullyMapped)).toBe(true);
+    expect(currentTarget(fullyMapped)).toBeNull();
+    expect(mappingSummary(fullyMapped).every((entry) => entry.bound)).toBe(true);
   });
 });

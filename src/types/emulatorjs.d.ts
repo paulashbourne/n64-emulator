@@ -8,6 +8,14 @@ declare global {
   interface EmulatorJsGameManager {
     restart?: () => void;
     saveSaveFiles?: () => void;
+    getSaveFile?: (save?: boolean) => Uint8Array | null;
+    getSaveFilePath?: () => string;
+    loadSaveFiles?: () => void;
+    writeFile?: (path: string, data: Uint8Array | ArrayBuffer) => void;
+    FS?: {
+      analyzePath?: (path: string) => { exists: boolean };
+      unlink?: (path: string) => void;
+    };
     simulateInput?: (player: number, index: number, value: number) => void;
     functions?: EmulatorJsGameManagerFunctions;
   }

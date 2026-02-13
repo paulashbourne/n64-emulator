@@ -11,21 +11,38 @@ A browser-based N64 emulator app scaffold with:
 - Library utilities for re-indexing previously authorized folder handles
 - Per-ROM removal from the local catalog (without clearing all app data)
 - Quick “Resume Last Played” launcher in the library
+- Built-in N64 box art inventory (540 titles) with automatic ROM title matching in Library and Resume cards
 - Library sorting supports title, last played, and size
 - Favorites workflow (favorite/unfavorite, favorites-only filter, favorites-first sort)
 - Library view preferences persist (sort mode and favorites-only filter)
 - One-click controller keyboard preset in the mapping wizard
-- Keyboard shortcuts on play screen: `Space` pause/resume, `R` reset, `M` open mapper, `Esc` close mapper
+- Keyboard shortcuts on play screen: `Space` pause/resume, `R` reset, `M` open mapper, `O` menu, `H` HUD, `Y` host stabilize viewers, `Esc` close overlays
+- Immersive play HUD controls: instant hide/show (`H`) and optional auto-hide while running
 - Online session MVP: host/join via invite code with up to 4 player slots and live remote input relay into player 2-4
 - Session-aware host flow: choose ROM later in Library while preserving active online session context
 - Invite UX upgrades: copy invite code or full join link, plus deep-link join prefill (`/online?code=...`)
 - Joiner input upgrades: keyboard hold/release capture + gamepad button capture with transition-based relay
 - In-room chat with recent message history retained in session snapshots
 - WebSocket heartbeat (`ping`/`pong`) from host and joiners for better long-session stability
+- Lightweight per-member latency update events (`member_latency`) to avoid full room-state churn
 - Host moderation: explicit “End Session” control that disconnects room members with a clear reason
 - In-room host ROM picker: set/clear room ROM directly from session page (no navigation required)
 - Host moderation: kick specific players from room without ending the whole session
+- Host slot management: move guests into open slots or swap occupied player slots live
 - Recent Sessions on Online page with one-click reopen and persisted local history
+- Guest stream quality hints: guests can request host stream mode changes in-session
+- Host input moderation: mute or unmute individual guest controller input live
+  - Room-synced mute state across reconnects/session views with host blocked-input telemetry
+- Online session lobby moderation: host can mute/unmute all guest inputs with one action
+- Per-player relay latency telemetry for host and guests in online session/player controls
+- Guest input relay modes (Auto/Responsive/Balanced/Conservative) with persisted session view preferences
+- Guest quick input deck supports both tap and hold actions for cleaner touch/controller hybrid play
+- Guest can auto-request host stream quality mode on sustained degraded network (toggleable)
+- Guest playback watchdog can auto-recover frozen stream playback (toggleable)
+- Host play menu now shows per-viewer stream diagnostics (health, RTT, FPS, bitrate)
+- Host viewer-pressure panel highlights degraded links with one-click and optional auto stabilization
+- Host can manually re-sync an individual viewer stream and auto-heal poor viewer links
+- Guest “Latency Rescue” action instantly switches to low-latency controls and requests host stream rescue
 
 ## Current core status
 
@@ -56,6 +73,12 @@ For online multiplayer flows in local development, run the coordinator server to
 npm run dev:multiplayer
 ```
 
+Optional for production multiplayer reliability, configure custom ICE servers (including TURN) in `.env`:
+
+```bash
+VITE_MULTIPLAYER_ICE_SERVERS='[{"urls":["stun:stun.l.google.com:19302"]},{"urls":"turn:turn.example.com:3478","username":"demo","credential":"secret"}]'
+```
+
 ## Scripts
 
 - `npm run dev` - start development server
@@ -66,6 +89,7 @@ npm run dev:multiplayer
 - `npm run test:e2e` - run Playwright smoke tests (fast synthetic ROM fixtures)
 - `npm run coverage` - run tests with coverage output
 - `npm run sync:emulatorjs` - refresh local EmulatorJS runtime/core assets
+- `npm run sync:covers` - rebuild `src/roms/n64CoverInventory.ts` from libretro cover metadata
 
 ## E2E smoke test
 
@@ -87,9 +111,20 @@ npm run test:e2e -- e2e/duplicate-import.smoke.spec.ts
 npm run test:e2e -- e2e/online-session.smoke.spec.ts
 npm run test:e2e -- e2e/online-chat.smoke.spec.ts
 npm run test:e2e -- e2e/online-session-end.smoke.spec.ts
+npm run test:e2e -- e2e/online-session-input-mute.smoke.spec.ts
+npm run test:e2e -- e2e/online-session-bulk-mute.smoke.spec.ts
 npm run test:e2e -- e2e/online-room-rom-picker.smoke.spec.ts
 npm run test:e2e -- e2e/online-kick-member.smoke.spec.ts
 npm run test:e2e -- e2e/online-recent-sessions.smoke.spec.ts
+npm run test:e2e -- e2e/online-player-relay-latency.smoke.spec.ts
+npm run test:e2e -- e2e/online-slot-reassign.smoke.spec.ts
+npm run test:e2e -- e2e/online-slot-swap.smoke.spec.ts
+npm run test:e2e -- e2e/online-stream-quality-hint.smoke.spec.ts
+npm run test:e2e -- e2e/online-input-moderation.smoke.spec.ts
+npm run test:e2e -- e2e/online-guest-relay-mode.smoke.spec.ts
+npm run test:e2e -- e2e/online-host-viewer-telemetry.smoke.spec.ts
+npm run test:e2e -- e2e/online-latency-rescue.smoke.spec.ts
+npm run test:e2e -- e2e/play-hud-immersive.smoke.spec.ts
 ```
 
 ## Online multiplayer architecture (MVP)

@@ -50,9 +50,13 @@ export function createKeyboardPresetBindings(): Partial<Record<N64ControlTarget,
 export function createInitialWizardState(
   bindings?: Partial<Record<N64ControlTarget, InputBinding>>,
 ): MappingWizardState {
+  const initialBindings = bindings ?? {};
+  const firstUnmappedIndex = N64_MAPPING_ORDER.findIndex((target) => !initialBindings[target]);
+  const initialStepIndex = firstUnmappedIndex === -1 ? N64_MAPPING_ORDER.length : firstUnmappedIndex;
+
   return {
-    stepIndex: 0,
-    bindings: bindings ?? {},
+    stepIndex: initialStepIndex,
+    bindings: initialBindings,
     skippedTargets: [],
   };
 }
