@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ChangeEvent, MutableRefObject } from 'react';
-import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { Link, NavLink, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 
 import { ControllerWizard } from '../components/ControllerWizard';
 import { VirtualController } from '../components/VirtualController';
@@ -589,6 +589,7 @@ export function PlayPage() {
     : undefined;
   const sessionRoute = buildSessionRoute(onlineSessionContext);
   const libraryRoute = buildSessionLibraryUrl(onlineSessionContext);
+  const onlineRoute = sessionRoute ?? '/online';
   const initialHostDiagnosticsPreferences = useMemo(
     () => loadOnlineHostDiagnosticsPreferences(),
     [],
@@ -3042,16 +3043,25 @@ export function PlayPage() {
         {hudVisible ? (
           <div className="play-overlay-top">
             <div className="play-overlay-left">
-              <button
-                type="button"
-                className="play-menu-toggle"
-                onClick={() => {
-                  setCompactActionTrayOpen(false);
-                  setMenuOpen((value) => !value);
-                }}
-              >
-                {menuOpen ? 'Hide Menu' : 'Menu'}
-              </button>
+              <div className="play-primary-nav-strip">
+                <nav className="app-header-nav play-primary-nav" aria-label="Primary">
+                  <NavLink to={libraryRoute} end>
+                    Library
+                  </NavLink>
+                  <NavLink to={onlineRoute}>Online</NavLink>
+                  <NavLink to="/settings">Settings</NavLink>
+                </nav>
+                <button
+                  type="button"
+                  className="play-menu-toggle"
+                  onClick={() => {
+                    setCompactActionTrayOpen(false);
+                    setMenuOpen((value) => !value);
+                  }}
+                >
+                  {menuOpen ? 'Hide Menu' : 'Menu'}
+                </button>
+              </div>
               <div className="play-overlay-meta">
                 <h1>{rom?.title ?? 'Loading ROM…'}</h1>
                 <p>
