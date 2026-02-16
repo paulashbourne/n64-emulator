@@ -1443,6 +1443,30 @@ label {
   margin: 0;
 }
 
+.play-profile-quick-switch {
+  display: grid;
+  gap: 0.4rem;
+  max-width: min(100%, 24rem);
+}
+
+.play-profile-quick-switch summary {
+  cursor: pointer;
+  color: rgba(201, 222, 255, 0.94);
+}
+
+.play-profile-quick-switch[open] summary {
+  color: rgba(255, 230, 191, 0.94);
+}
+
+.play-profile-quick-switch-panel {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.play-profile-quick-switch-panel label {
+  font-size: 0.82rem;
+}
+
 .play-inline-error {
   display: grid;
   gap: 0.4rem;
@@ -4151,6 +4175,12 @@ label {
   .play-overlay-top,
   .play-overlay-bottom {
     padding: 0.62rem 0.65rem;
+  }
+
+  .play-profile-quick-switch,
+  .play-profile-quick-switch-panel,
+  .play-profile-quick-switch-panel select {
+    width: 100%;
   }
 
   .play-overlay-left {
