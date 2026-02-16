@@ -1638,11 +1638,25 @@ label {
 }
 
 .wizard-summary li {
-  display: flex;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  align-items: center;
   gap: 0.8rem;
   border-bottom: 1px dashed rgba(255, 255, 255, 0.24);
-  padding-bottom: 0.2rem;
+  padding-bottom: 0.35rem;
+}
+
+.wizard-summary li span:last-of-type {
+  text-align: right;
+  word-break: break-word;
+}
+
+.wizard-summary li button {
+  margin: 0;
+}
+
+.wizard-summary-item-active {
+  border-bottom-color: rgba(138, 197, 255, 0.68);
 }
 
 .wizard-actions {
@@ -3472,6 +3486,15 @@ label {
 
   .wizard-main {
     grid-template-columns: 1fr;
+  }
+
+  .wizard-summary li {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.28rem;
+  }
+
+  .wizard-summary li span:last-of-type {
+    text-align: left;
   }
 
   .play-overlay-top {

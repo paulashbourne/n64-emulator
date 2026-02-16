@@ -167,6 +167,14 @@ function getBindingMagnitude(
   return normalizeAxisMagnitude(directed, threshold);
 }
 
+export function isBindingActive(
+  binding: InputBinding,
+  keySet: Set<string>,
+  gamepadsOverride?: Gamepad[],
+): boolean {
+  return getBindingMagnitude(binding, keySet, gamepadsOverride) > 0;
+}
+
 function evaluateDigitalTarget(
   target: N64DigitalTarget,
   profile: ControllerProfile,

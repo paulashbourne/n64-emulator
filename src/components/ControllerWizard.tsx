@@ -14,9 +14,9 @@ import {
   wizardProgress,
   type MappingWizardState,
 } from '../input/mappingWizard';
-import { bindingToLabel, captureNextInput, controlPrompt } from '../input/inputService';
-import { CONTROL_LABELS, isAnalogTarget } from '../types/input';
-import type { ControllerProfile, InputBinding } from '../types/input';
+import { bindingToLabel, captureNextInput, controlPrompt, isBindingActive } from '../input/inputService';
+import { CONTROL_LABELS, isAnalogTarget, N64_MAPPING_ORDER } from '../types/input';
+import type { ControllerProfile, InputBinding, N64ControlTarget } from '../types/input';
 
 type ControllerWizardSaveMode = 'create' | 'edit';
 
@@ -54,14 +54,30 @@ export function ControllerWizard({
   const [isCapturing, setIsCapturing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string>();
+  const [singleRemapTarget, setSingleRemapTarget] = useState<N64ControlTarget | null>(null);
   const captureAbortRef = useRef<AbortController | null>(null);
   const lastCapturedBindingRef = useRef<InputBinding | undefined>(undefined);
   const captureInFlightRef = useRef(false);
+  const heldKeysRef = useRef<Set<string>>(new Set());
 
   const target = currentTarget(wizardState);
   const complete = isWizardComplete(wizardState);
   const progress = wizardProgress(wizardState);
   const summary = useMemo(() => mappingSummary(wizardState), [wizardState]);
+
+  const readConnectedGamepads = useCallback((): Gamepad[] => {
+    if (typeof navigator === 'undefined' || typeof navigator.getGamepads !== 'function') {
+      return [];
+    }
+    return Array.from(navigator.getGamepads()).filter((pad): pad is Gamepad => Boolean(pad));
+  }, []);
+
+  const isWaitingForRelease = useCallback(
+    (binding: InputBinding): boolean => {
+      return isBindingActive(binding, heldKeysRef.current, readConnectedGamepads());
+    },
+    [readConnectedGamepads],
+  );
 
   const stopCapture = useCallback((): void => {
     if (captureAbortRef.current) {
@@ -96,7 +112,25 @@ export function ControllerWizard({
       }
 
       lastCapturedBindingRef.current = binding;
-      setWizardState((state) => assignBindingAndAdvance(state, binding));
+      const isSingleTargetRemap = singleRemapTarget !== null && target === singleRemapTarget;
+      setWizardState((state) => {
+        if (!isSingleTargetRemap) {
+          return assignBindingAndAdvance(state, binding);
+        }
+
+        return {
+          ...state,
+          bindings: {
+            ...state.bindings,
+            [target]: binding,
+          },
+          skippedTargets: state.skippedTargets.filter((entry) => entry !== target),
+          stepIndex: N64_MAPPING_ORDER.length,
+        };
+      });
+      if (isSingleTargetRemap) {
+        setSingleRemapTarget(null);
+      }
     } catch (captureError) {
       if (captureError instanceof Error && captureError.name === 'AbortError') {
         return;
@@ -110,14 +144,40 @@ export function ControllerWizard({
         setIsCapturing(false);
       }
     }
-  }, [isCapturing, isSaving, target]);
+  }, [isCapturing, isSaving, singleRemapTarget, target]);
 
   useEffect(() => {
     if (!target || isSaving || isCapturing) {
       return;
     }
-    void onCapture();
-  }, [isCapturing, isSaving, onCapture, target]);
+    const waitingBinding = lastCapturedBindingRef.current;
+    if (!waitingBinding || !isWaitingForRelease(waitingBinding)) {
+      void onCapture();
+      return;
+    }
+
+    let frameHandle: number | null = null;
+    let cancelled = false;
+
+    const pollForRelease = (): void => {
+      if (cancelled) {
+        return;
+      }
+      if (isWaitingForRelease(waitingBinding)) {
+        frameHandle = requestAnimationFrame(pollForRelease);
+        return;
+      }
+      void onCapture();
+    };
+
+    frameHandle = requestAnimationFrame(pollForRelease);
+    return () => {
+      cancelled = true;
+      if (frameHandle !== null) {
+        cancelAnimationFrame(frameHandle);
+      }
+    };
+  }, [isCapturing, isSaving, isWaitingForRelease, onCapture, target]);
 
   useEffect(() => {
     const onGlobalKeyDown = (event: KeyboardEvent): void => {
@@ -136,6 +196,7 @@ export function ControllerWizard({
         return;
       }
 
+      heldKeysRef.current.add(event.code);
       event.preventDefault();
       event.stopPropagation();
     };
@@ -156,6 +217,7 @@ export function ControllerWizard({
         return;
       }
 
+      heldKeysRef.current.delete(event.code);
       event.preventDefault();
       event.stopPropagation();
     };
@@ -178,6 +240,14 @@ export function ControllerWizard({
     setError(undefined);
     stopCapture();
     lastCapturedBindingRef.current = undefined;
+    if (singleRemapTarget) {
+      setSingleRemapTarget(null);
+      setWizardState((state) => ({
+        ...state,
+        stepIndex: N64_MAPPING_ORDER.length,
+      }));
+      return;
+    }
     setWizardState((state) => goBack(state));
   };
 
@@ -185,6 +255,14 @@ export function ControllerWizard({
     setError(undefined);
     stopCapture();
     lastCapturedBindingRef.current = undefined;
+    if (singleRemapTarget) {
+      setSingleRemapTarget(null);
+      setWizardState((state) => ({
+        ...state,
+        stepIndex: N64_MAPPING_ORDER.length,
+      }));
+      return;
+    }
     setWizardState((state) => skipCurrentTarget(state));
   };
 
@@ -192,19 +270,37 @@ export function ControllerWizard({
     setError(undefined);
     stopCapture();
     lastCapturedBindingRef.current = undefined;
+    setSingleRemapTarget(null);
     setWizardState(resetWizard());
   };
 
   const onApplyKeyboardPreset = (): void => {
     setError(undefined);
     lastCapturedBindingRef.current = undefined;
+    setSingleRemapTarget(null);
     setWizardState(applyKeyboardPreset());
   };
 
   const onCancelWizard = (): void => {
     stopCapture();
     lastCapturedBindingRef.current = undefined;
+    setSingleRemapTarget(null);
     onCancel();
+  };
+
+  const onRemapSingleControl = (remapTarget: N64ControlTarget): void => {
+    const stepIndex = N64_MAPPING_ORDER.indexOf(remapTarget);
+    if (stepIndex === -1) {
+      return;
+    }
+
+    setError(undefined);
+    stopCapture();
+    setSingleRemapTarget(remapTarget);
+    setWizardState((state) => ({
+      ...state,
+      stepIndex,
+    }));
   };
 
   const onSave = async (event: FormEvent): Promise<void> => {
@@ -264,6 +360,11 @@ export function ControllerWizard({
             <>
               <h3>{controlPrompt(target)}</h3>
               <p>Current target: <strong>{CONTROL_LABELS[target]}</strong></p>
+              {singleRemapTarget === target ? (
+                <p className="wizard-preset-hint">
+                  Quick remap mode: this update applies only to <strong>{CONTROL_LABELS[target]}</strong>.
+                </p>
+              ) : null}
               <p className="wizard-preset-hint">
                 {isCapturing ? 'Listening now. Press the button you want mapped.' : 'Capture paused. Press recapture to listen again.'}
               </p>
@@ -272,10 +373,10 @@ export function ControllerWizard({
                   {isCapturing ? 'Listening…' : 'Recapture Input'}
                 </button>
                 <button type="button" onClick={onBack} disabled={isCapturing || isSaving || wizardState.stepIndex === 0}>
-                  Back
+                  {singleRemapTarget === target ? 'Cancel Quick Remap' : 'Back'}
                 </button>
                 <button type="button" onClick={onSkip} disabled={isSaving}>
-                  Skip
+                  {singleRemapTarget === target ? 'Skip Quick Remap' : 'Skip'}
                 </button>
                 <button type="button" onClick={onReset} disabled={isCapturing || isSaving}>
                   Reset
@@ -302,9 +403,18 @@ export function ControllerWizard({
           <h3>Mapped Controls</h3>
           <ul>
             {summary.map((entry) => (
-              <li key={entry.target}>
+              <li key={entry.target} className={singleRemapTarget === entry.target ? 'wizard-summary-item-active' : undefined}>
                 <span>{entry.label}</span>
                 <span>{entry.bound ? bindingToLabel(wizardState.bindings[entry.target]!) : 'Not mapped'}</span>
+                {effectiveSaveMode === 'edit' ? (
+                  <button
+                    type="button"
+                    onClick={() => onRemapSingleControl(entry.target)}
+                    disabled={isSaving || isCapturing}
+                  >
+                    {singleRemapTarget === entry.target ? (isCapturing ? 'Listening…' : 'Remap Selected') : 'Remap Only'}
+                  </button>
+                ) : null}
               </li>
             ))}
           </ul>
