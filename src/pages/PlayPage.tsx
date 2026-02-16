@@ -3025,6 +3025,7 @@ export function PlayPage() {
         : onlineRelayEnabled && isOnlineHost
           ? 'Shortcuts: Space pause/resume • R reset • M map controller • O menu • H HUD • Y stabilize viewers • Esc close overlays.'
           : 'Shortcuts: Space pause/resume • R reset • M map controller • O menu • H HUD • Esc close overlays.';
+  const activeProfileSummaryLabel = activeProfile?.name ?? 'None';
 
   return (
     <section
@@ -3169,6 +3170,30 @@ export function PlayPage() {
         {hudVisible || error || emulatorWarning ? (
           <div className="play-overlay-bottom">
             <p>{shortcutHint}</p>
+            {!onlineRelayEnabled ? (
+              profiles.length > 0 ? (
+                <details className="play-profile-quick-switch">
+                  <summary>Applied controller profile: {activeProfileSummaryLabel}</summary>
+                  <div className="play-profile-quick-switch-panel">
+                    <label htmlFor="play-overlay-profile-switcher">Quick swap profile</label>
+                    <select
+                      id="play-overlay-profile-switcher"
+                      value={activeProfileId ?? ''}
+                      onChange={(event) => setActiveProfile(event.target.value || undefined)}
+                    >
+                      <option value="">None</option>
+                      {profiles.map((profile) => (
+                        <option key={profile.profileId} value={profile.profileId}>
+                          {profile.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </details>
+              ) : (
+                <p>Applied controller profile: {activeProfileSummaryLabel}</p>
+              )
+            ) : null}
             {error && status !== 'error' ? (
               <div className="play-inline-error">
                 <p className="error-text">{error}</p>
