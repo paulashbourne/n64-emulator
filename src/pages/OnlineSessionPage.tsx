@@ -205,6 +205,16 @@ const QUICK_INPUTS: Array<{ label: string; control: N64ControlTarget }> = [
 ];
 
 const QUICK_CHAT_PRESETS = ['Ready?', 'Need 1 min', 'Re-sync please', 'Nice run!', 'GG'];
+const VOICE_JOIN_TOOLTIP = 'If you want to join the conversation, click here to unmute yourself.';
+const VOICE_MEDIA_CONSTRAINTS: MediaStreamConstraints = {
+  audio: {
+    echoCancellation: true,
+    noiseSuppression: true,
+    autoGainControl: true,
+    channelCount: 1,
+  },
+  video: false,
+};
 
 function defaultOnlineSessionViewPreferences(): OnlineSessionViewPreferences {
   if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
@@ -403,6 +413,7 @@ function sessionSnapshotSignature(session: MultiplayerSessionSnapshot): string {
     romId: session.romId ?? null,
     romTitle: session.romTitle ?? null,
     joinLocked: Boolean(session.joinLocked),
+    voiceEnabled: Boolean(session.voiceEnabled),
     members: session.members.map((member) => ({
       clientId: member.clientId,
       slot: member.slot,
@@ -616,6 +627,7 @@ function normalizeSessionSnapshot(session: MultiplayerSessionSnapshot): Multipla
   return {
     ...session,
     joinLocked: Boolean((session as { joinLocked?: unknown }).joinLocked),
+    voiceEnabled: Boolean((session as { voiceEnabled?: unknown }).voiceEnabled),
     chat: Array.isArray((session as { chat?: unknown }).chat) ? session.chat : [],
     mutedInputClientIds: Array.isArray((session as { mutedInputClientIds?: unknown }).mutedInputClientIds)
       ? (session as { mutedInputClientIds: string[] }).mutedInputClientIds
@@ -684,6 +696,9 @@ export function OnlineSessionPage() {
   const suppressQuickTapUntilRef = useRef<number>(0);
   const guestPeerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const guestPendingIceCandidatesRef = useRef<RTCIceCandidateInit[]>([]);
+  const guestVoiceLocalStreamRef = useRef<MediaStream | null>(null);
+  const guestVoiceLocalTrackRef = useRef<MediaStreamTrack | null>(null);
+  const guestVoiceSenderRef = useRef<RTCRtpSender | null>(null);
   const guestStreamStatsBaselineRef = useRef<{ bytesReceived: number; measuredAtMs: number } | undefined>(undefined);
   const guestAutoResyncTimerRef = useRef<number | null>(null);
   const guestHardResyncTimerRef = useRef<number | null>(null);
@@ -753,7 +768,10 @@ export function OnlineSessionPage() {
   const [savingHostRomSelection, setSavingHostRomSelection] = useState(false);
   const [hostStreamStatus, setHostStreamStatus] = useState<HostStreamStatus>('idle');
   const hostStreamStatusRef = useRef<HostStreamStatus>('idle');
-  const [hostStreamMuted, setHostStreamMuted] = useState(true);
+  const [lobbyAudioMuted, setLobbyAudioMuted] = useState(false);
+  const [voiceInputMuted, setVoiceInputMuted] = useState(true);
+  const [voiceMicRequesting, setVoiceMicRequesting] = useState(false);
+  const [voiceMicError, setVoiceMicError] = useState<string>();
   const [wizardOpen, setWizardOpen] = useState(false);
   const [wizardMode, setWizardMode] = useState<WizardMode>('create');
   const [wizardTemplateProfile, setWizardTemplateProfile] = useState<ControllerProfile>();
@@ -1832,6 +1850,7 @@ export function OnlineSessionPage() {
       peer.close();
       guestPeerConnectionRef.current = null;
     }
+    guestVoiceSenderRef.current = null;
 
     guestPendingIceCandidatesRef.current = [];
     guestStreamStatsBaselineRef.current = undefined;
@@ -1859,6 +1878,58 @@ export function OnlineSessionPage() {
     clearGuestHardResyncTimer,
     setGuestStreamTelemetryIfChanged,
   ]);
+
+  const stopGuestVoiceCapture = useCallback((): void => {
+    const stream = guestVoiceLocalStreamRef.current;
+    if (stream) {
+      stream.getTracks().forEach((track) => {
+        track.stop();
+      });
+    }
+    guestVoiceLocalStreamRef.current = null;
+    guestVoiceLocalTrackRef.current = null;
+    guestVoiceSenderRef.current = null;
+    setVoiceMicRequesting(false);
+  }, []);
+
+  const ensureGuestVoiceCapture = useCallback(async (): Promise<MediaStreamTrack | null> => {
+    const currentTrack = guestVoiceLocalTrackRef.current;
+    if (currentTrack && currentTrack.readyState === 'live') {
+      return currentTrack;
+    }
+
+    if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
+      setVoiceMicError('Microphone capture is unavailable in this browser.');
+      return null;
+    }
+
+    setVoiceMicRequesting(true);
+    setVoiceMicError(undefined);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia(VOICE_MEDIA_CONSTRAINTS);
+      const track = stream.getAudioTracks()[0];
+      if (!track) {
+        stream.getTracks().forEach((candidate) => candidate.stop());
+        throw new Error('No microphone track was detected.');
+      }
+      const previousStream = guestVoiceLocalStreamRef.current;
+      if (previousStream && previousStream !== stream) {
+        previousStream.getTracks().forEach((candidate) => candidate.stop());
+      }
+      guestVoiceLocalStreamRef.current = stream;
+      guestVoiceLocalTrackRef.current = track;
+      return track;
+    } catch (captureError) {
+      const message =
+        captureError instanceof Error && captureError.message.trim().length > 0
+          ? captureError.message
+          : 'Microphone permission was denied.';
+      setVoiceMicError(message);
+      return null;
+    } finally {
+      setVoiceMicRequesting(false);
+    }
+  }, []);
 
   const requestGuestStreamResync = useCallback(
     (
@@ -1982,6 +2053,15 @@ export function OnlineSessionPage() {
   const ensureGuestPeerConnection = useCallback((hostClientId: string): RTCPeerConnection => {
     const existing = guestPeerConnectionRef.current;
     if (existing) {
+      if (
+        !guestVoiceSenderRef.current &&
+        guestVoiceLocalTrackRef.current &&
+        guestVoiceLocalStreamRef.current &&
+        Boolean(session?.voiceEnabled) &&
+        !voiceInputMuted
+      ) {
+        guestVoiceSenderRef.current = existing.addTrack(guestVoiceLocalTrackRef.current, guestVoiceLocalStreamRef.current);
+      }
       return existing;
     }
 
@@ -2006,6 +2086,7 @@ export function OnlineSessionPage() {
       if (video && video.srcObject !== stream) {
         wireGuestVideoStatusHandlers(video);
         video.srcObject = stream;
+        video.muted = lobbyAudioMuted;
         void video.play().catch(() => {
           // Autoplay can be blocked on some browsers until interaction.
         });
@@ -2031,9 +2112,18 @@ export function OnlineSessionPage() {
       }
     };
 
+    if (
+      guestVoiceLocalTrackRef.current &&
+      guestVoiceLocalStreamRef.current &&
+      Boolean(session?.voiceEnabled) &&
+      !voiceInputMuted
+    ) {
+      guestVoiceSenderRef.current = connection.addTrack(guestVoiceLocalTrackRef.current, guestVoiceLocalStreamRef.current);
+    }
+
     guestPeerConnectionRef.current = connection;
     return connection;
-  }, [scheduleGuestAutoResync, wireGuestVideoStatusHandlers]);
+  }, [lobbyAudioMuted, scheduleGuestAutoResync, session?.voiceEnabled, voiceInputMuted, wireGuestVideoStatusHandlers]);
 
   const flushPendingGuestIceCandidates = useCallback((connection: RTCPeerConnection): void => {
     if (guestPendingIceCandidatesRef.current.length === 0) {
@@ -2125,6 +2215,79 @@ export function OnlineSessionPage() {
     setHostStreamStatus('idle');
     clearGuestPeerConnection();
   }, [clearGuestPeerConnection, isHost]);
+
+  useEffect(() => {
+    const video = hostStreamVideoRef.current;
+    if (!video) {
+      return;
+    }
+    video.muted = lobbyAudioMuted;
+  }, [lobbyAudioMuted]);
+
+  useEffect(() => {
+    if (isHost || !session?.voiceEnabled) {
+      if (!voiceInputMuted) {
+        setVoiceInputMuted(true);
+      }
+      setVoiceMicError(undefined);
+      stopGuestVoiceCapture();
+      return;
+    }
+
+    if (voiceInputMuted) {
+      const voiceTrack = guestVoiceLocalTrackRef.current;
+      if (voiceTrack) {
+        voiceTrack.enabled = false;
+      }
+      if (guestVoiceSenderRef.current) {
+        void guestVoiceSenderRef.current.replaceTrack(null).catch(() => {
+          // Keep playback running even if sender detaches poorly on some browsers.
+        });
+      }
+      return;
+    }
+
+    let cancelled = false;
+    void (async () => {
+      const voiceTrack = await ensureGuestVoiceCapture();
+      if (cancelled || !voiceTrack) {
+        return;
+      }
+      voiceTrack.enabled = true;
+
+      const connection = guestPeerConnectionRef.current;
+      if (!connection || !guestVoiceLocalStreamRef.current) {
+        return;
+      }
+
+      if (!guestVoiceSenderRef.current) {
+        guestVoiceSenderRef.current = connection.addTrack(voiceTrack, guestVoiceLocalStreamRef.current);
+        requestGuestStreamResync('manual', { silent: true, bypassCooldown: true });
+        return;
+      }
+
+      void guestVoiceSenderRef.current.replaceTrack(voiceTrack).catch(() => {
+        // Ignore replacement failures and keep stream playback active.
+      });
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    ensureGuestVoiceCapture,
+    isHost,
+    requestGuestStreamResync,
+    session?.voiceEnabled,
+    stopGuestVoiceCapture,
+    voiceInputMuted,
+  ]);
+
+  useEffect(() => {
+    return () => {
+      stopGuestVoiceCapture();
+    };
+  }, [stopGuestVoiceCapture]);
 
   useEffect(() => {
     return () => {
@@ -2871,7 +3034,7 @@ export function OnlineSessionPage() {
   };
 
   useEffect(() => {
-    if (isHost || !canSendGuestControllerInput || !activeProfile) {
+    if (isHost || !canSendGuestControllerInput || !activeProfile || wizardOpen) {
       return;
     }
 
@@ -2913,7 +3076,7 @@ export function OnlineSessionPage() {
       releaseAllHeldQuickControls();
       setGamepadConnected(false);
     };
-  }, [activeProfile, canSendGuestControllerInput, emitRemoteControlState, isHost, maybeEmitRemoteAnalogState, releaseAllHeldQuickControls]);
+  }, [activeProfile, canSendGuestControllerInput, emitRemoteControlState, isHost, maybeEmitRemoteAnalogState, releaseAllHeldQuickControls, wizardOpen]);
 
   useEffect(() => {
     if (isHost || canSendGuestControllerInput) {
@@ -3589,6 +3752,11 @@ export function OnlineSessionPage() {
         return;
       }
 
+      if (wizardOpen) {
+        event.preventDefault();
+        return;
+      }
+
       if (event.shiftKey && event.code === 'KeyT') {
         event.preventDefault();
         onTurboLatencyMode();
@@ -3657,7 +3825,7 @@ export function OnlineSessionPage() {
 
       if (!event.shiftKey && event.code === 'KeyM') {
         event.preventDefault();
-        setHostStreamMuted((value) => !value);
+        setLobbyAudioMuted((value) => !value);
         return;
       }
 
@@ -3702,6 +3870,7 @@ export function OnlineSessionPage() {
     resetGuestPhoneLayout,
     requestGuestStreamResync,
     showVirtualController,
+    wizardOpen,
   ]);
 
   const onFocusChatComposer = useCallback((): void => {
@@ -3894,6 +4063,11 @@ export function OnlineSessionPage() {
         return;
       }
 
+      if (wizardOpen) {
+        event.preventDefault();
+        return;
+      }
+
       if (event.code === 'KeyG') {
         event.preventDefault();
         onLaunchHostRom();
@@ -3916,7 +4090,7 @@ export function OnlineSessionPage() {
     return () => {
       window.removeEventListener('keydown', onKeyDown);
     };
-  }, [isHost, onLaunchHostRom, onPingWaitingPlayers, onSendReadyCheck]);
+  }, [isHost, onLaunchHostRom, onPingWaitingPlayers, onSendReadyCheck, wizardOpen]);
 
   const onSendQuickChat = useCallback((message: string): void => {
     const sent = sendChatMessage(message);
@@ -4066,6 +4240,56 @@ export function OnlineSessionPage() {
       };
     });
     setClipboardFeedback(nextLocked ? 'Room joins locked.' : 'Room joins unlocked.');
+  };
+
+  const onToggleSessionVoiceEnabled = (): void => {
+    if (!isHost) {
+      return;
+    }
+    const socket = socketRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      setClipboardFeedback('Connect before changing voice settings.');
+      return;
+    }
+    const nextEnabled = !session?.voiceEnabled;
+    socket.send(
+      JSON.stringify({
+        type: 'set_voice_enabled',
+        enabled: nextEnabled,
+      }),
+    );
+    setSession((current) => {
+      if (!current) {
+        return current;
+      }
+      return {
+        ...current,
+        voiceEnabled: nextEnabled,
+      };
+    });
+    setClipboardFeedback(nextEnabled ? 'Lobby voice enabled.' : 'Lobby voice disabled.');
+  };
+
+  const onToggleVoiceInputMuted = (): void => {
+    if (isHost || !session?.voiceEnabled) {
+      return;
+    }
+    if (voiceInputMuted) {
+      setVoiceInputMuted(false);
+      setVoiceMicError(undefined);
+      return;
+    }
+
+    setVoiceInputMuted(true);
+    const voiceTrack = guestVoiceLocalTrackRef.current;
+    if (voiceTrack) {
+      voiceTrack.enabled = false;
+    }
+    if (guestVoiceSenderRef.current) {
+      void guestVoiceSenderRef.current.replaceTrack(null).catch(() => {
+        // Ignore replacement failures and keep stream playback active.
+      });
+    }
   };
 
   const openCreateWizard = (): void => {
@@ -4418,6 +4642,9 @@ export function OnlineSessionPage() {
           <span className={readyClass(everyoneConnectedReady, connectedPlayers > 0)}>
             Ready: {connectedReadyPlayers}/{connectedPlayers || 1}
           </span>
+          <span className={session?.voiceEnabled ? 'status-pill status-good' : 'status-pill status-warn'}>
+            Voice: {session?.voiceEnabled ? 'On' : 'Off'}
+          </span>
           {advancedSessionTools || isHost ? (
             <span
               className={
@@ -4527,6 +4754,16 @@ export function OnlineSessionPage() {
           {isHost && !session?.romId ? (
             <button type="button" className="online-rom-cta-button" onClick={onJumpToHostRomSetup}>
               Pick ROM
+            </button>
+          ) : null}
+          {isHost ? (
+            <button
+              type="button"
+              className={session?.voiceEnabled ? 'online-rom-cta-button' : undefined}
+              onClick={onToggleSessionVoiceEnabled}
+              disabled={!canSendRealtimeInput}
+            >
+              {session?.voiceEnabled ? 'Voice On' : 'Voice Off'}
             </button>
           ) : null}
           {isHost ? (
@@ -4837,18 +5074,292 @@ export function OnlineSessionPage() {
         </section>
       ) : null}
 
+      <section
+        ref={guestStreamPanelRef}
+        className={`panel online-guest-stream-panel ${!isHost && guestFocusMode ? 'focus' : ''} ${
+          !isHost && guestStreamPriorityMode ? 'online-guest-stream-priority' : ''
+        } ${!isHost && showGuestDiagnosticsPanel ? 'online-guest-diagnostics-expanded' : 'online-guest-diagnostics-compact'} ${
+          isHost ? 'online-host-stream-panel' : ''
+        }`}
+      >
+        <div className={`online-guest-stage ${!isHost && guestFocusMode ? 'online-guest-stage-focus' : ''}`}>
+          <div className="play-overlay-top online-guest-stage-top">
+            <div className="play-overlay-left">
+              <button
+                type="button"
+                className="play-menu-toggle"
+                onClick={() =>
+                  isHost ? setHostControlsCollapsed((value) => !value) : setGuestFocusMode((value) => !value)
+                }
+              >
+                {isHost
+                  ? hostControlsCollapsed
+                    ? 'Show Host Tools'
+                    : 'Hide Host Tools'
+                  : guestFocusMode
+                    ? 'Disable Focus Mode'
+                    : 'Enable Focus Mode'}
+              </button>
+              <div className="play-overlay-meta">
+                <h2>Host Stream</h2>
+                <p>
+                  {isHost
+                    ? session?.romId
+                      ? 'Host Mode • Ready to launch'
+                      : 'Host Mode • Pick a room ROM'
+                    : `${hostStreamStatus === 'live' ? 'Live' : hostStreamStatus === 'connecting' ? 'Connecting' : 'Waiting'} • Remote Play`}
+                </p>
+              </div>
+            </div>
+            <div className="play-overlay-actions online-guest-stream-actions">
+              {isHost ? (
+                <>
+                  <button type="button" className="preset-button" onClick={onLaunchHostRom} disabled={!session?.romId}>
+                    Launch ROM
+                  </button>
+                  <button type="button" onClick={onToggleSessionVoiceEnabled} disabled={!canSendRealtimeInput}>
+                    {session?.voiceEnabled ? 'Disable Voice Chat' : 'Enable Voice Chat'}
+                  </button>
+                  <button type="button" onClick={() => setHostControlsCollapsed((value) => !value)}>
+                    {hostControlsCollapsed ? 'Show Host Tools' : 'Hide Host Tools'}
+                  </button>
+                  <button type="button" onClick={() => void onToggleGuestStreamFullscreen()}>
+                    {isGuestStreamFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}
+                  </button>
+                </>
+              ) : (
+                <>
+                  {session?.voiceEnabled ? (
+                    <button
+                      type="button"
+                      className={voiceInputMuted ? 'online-voice-join-button' : undefined}
+                      onClick={onToggleVoiceInputMuted}
+                      title={voiceInputMuted ? VOICE_JOIN_TOOLTIP : undefined}
+                      disabled={voiceMicRequesting}
+                    >
+                      {voiceMicRequesting
+                        ? 'Preparing Mic…'
+                        : voiceInputMuted
+                          ? 'Unmute to Talk'
+                          : 'Mute Mic'}
+                    </button>
+                  ) : (
+                    <button type="button" disabled>
+                      Voice Chat Off
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setLobbyAudioMuted((value) => !value)}
+                    disabled={hostStreamStatus !== 'live'}
+                  >
+                    {lobbyAudioMuted ? 'Unmute Lobby Audio' : 'Mute Lobby Audio'}
+                  </button>
+                  <button type="button" onClick={onRequestHostStreamResync} disabled={!canSendRealtimeInput}>
+                    Re-sync Stream
+                  </button>
+                  <button type="button" onClick={() => void onToggleGuestStreamFullscreen()}>
+                    {isGuestStreamFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+          <div className="play-stage-surface online-guest-stage-surface">
+            <div
+              ref={hostStreamShellRef}
+              className={`host-stream-shell ejs-player-host ejs-player-host-focus ${
+                !isHost && guestFocusMode ? 'host-stream-shell-focus' : ''
+              }`}
+            >
+              <video
+                ref={hostStreamVideoRef}
+                className="host-stream-video"
+                autoPlay
+                playsInline
+                muted={lobbyAudioMuted}
+                controls={false}
+              />
+              {(isHost || hostStreamPlaceholderTitle) ? (
+                <div className="host-stream-placeholder">
+                  <strong>
+                    {isHost
+                      ? session?.romId
+                        ? 'Launch gameplay to start stream'
+                        : 'Choose a room ROM'
+                      : hostStreamPlaceholderTitle}
+                  </strong>
+                  <span>
+                    {isHost
+                      ? session?.romId
+                        ? 'Start the ROM from this room or gameplay view and guests will receive your stream.'
+                        : 'Open Host Tools to choose a ROM for this room.'
+                      : hostStreamPlaceholderHint}
+                  </span>
+                </div>
+              ) : null}
+            </div>
+          </div>
+          <div className="play-overlay-bottom online-guest-stage-bottom">
+            {showGuestDiagnosticsPanel && !isHost ? (
+              <div className="session-status-row host-stream-telemetry-row">
+                <span className={guestNetworkHealthStatus.className}>Network: {guestNetworkHealthStatus.label}</span>
+                <span className={guestPlaybackStatus.className}>Playback: {guestPlaybackStatus.label}</span>
+                <span className="status-pill">Input relay: {guestInputRelayProfile.label}</span>
+                <span className="status-pill">
+                  Bitrate: {guestStreamTelemetry.bitrateKbps !== undefined ? `${guestStreamTelemetry.bitrateKbps} kbps` : 'Measuring…'}
+                </span>
+                <span className="status-pill">
+                  FPS: {guestStreamTelemetry.fps !== undefined ? guestStreamTelemetry.fps.toFixed(1) : 'Measuring…'}
+                </span>
+              </div>
+            ) : null}
+            <p className="online-subtle">
+              {isHost
+                ? session?.romId
+                  ? `Room ROM ready: ${session.romTitle ?? 'selected ROM'}. Launch when everyone is ready.`
+                  : 'No room ROM selected. Open Host Tools to pick a game.'
+                : hostStreamStatusText}
+            </p>
+            {isHost ? (
+              <>
+                {hostLaunchBlockedReason ? <p className="warning-text">{hostLaunchBlockedReason}</p> : null}
+                <p className="online-subtle">{hostQuickActionHint}</p>
+                <p className="online-subtle">
+                  Host extras are tucked under Host Tools to keep this gameplay layout aligned with guest view.
+                </p>
+              </>
+            ) : (
+              <>
+                {showGuestRescueCard ? (
+                  <div className="stream-quality-request-card online-rescue-card">
+                    <p>
+                      <strong>Stream needs recovery.</strong> Run rescue first, then request a stream resync if delay remains high.
+                    </p>
+                    <div className="wizard-actions">
+                      <button type="button" className="latency-rescue-button" onClick={onLatencyRescue}>
+                        Run Rescue
+                      </button>
+                      <button type="button" onClick={onRequestHostStreamResync} disabled={!canSendRealtimeInput}>
+                        Resync Now
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+                {session?.voiceEnabled ? (
+                  <p className={voiceInputMuted ? 'online-subtle online-voice-join-hint' : 'online-subtle'}>
+                    {voiceInputMuted
+                      ? VOICE_JOIN_TOOLTIP
+                      : 'Microphone is live. Click "Mute Mic" any time to leave conversation.'}
+                  </p>
+                ) : (
+                  <p className="online-subtle">Host has voice chat disabled for this room.</p>
+                )}
+                {voiceMicError ? <p className="warning-text">{voiceMicError}</p> : null}
+                <p className="online-subtle">{guestPlaybackStatus.detail}</p>
+                {advancedSessionTools ? <p className="online-subtle">{guestNetworkHealthStatus.recommendation}</p> : null}
+                {advancedSessionTools ? (
+                  <p className="online-subtle">
+                    Suggested host stream mode: {HOST_STREAM_PRESET_LABELS[suggestedHostPresetForGuest]}.
+                  </p>
+                ) : null}
+              </>
+            )}
+          </div>
+        </div>
+
+        {!isHost ? (
+          showGuestInputDeck ? (
+            <>
+              <h3 ref={guestInputDeckRef}>Controller Profile</h3>
+              {profiles.length > 0 ? (
+                <label>
+                  Active profile
+                  <select value={activeProfileId ?? ''} onChange={(event) => setActiveProfile(event.target.value || undefined)}>
+                    <option value="">None</option>
+                    {profiles.map((profile) => (
+                      <option key={profile.profileId} value={profile.profileId}>
+                        {profile.name}
+                        {profile.romHash ? ' (ROM-specific)' : ' (Global)'}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : (
+                <p className="online-subtle">No controller profiles yet.</p>
+              )}
+              <div className="wizard-actions">
+                <button type="button" onClick={openCreateWizard}>
+                  New Profile
+                </button>
+                <button type="button" onClick={openEditWizard} disabled={!activeProfile}>
+                  Edit Active
+                </button>
+                <button type="button" onClick={openCloneWizard} disabled={!activeProfile}>
+                  Clone Active
+                </button>
+              </div>
+
+              <h3>Send Controller Input</h3>
+              <p>Use your active profile, quick taps, or virtual controller to drive the host emulator in real time.</p>
+              <p className="online-subtle">
+                Keyboard: <code>X</code> A, <code>C</code> B, <code>Z</code> Z, <code>Enter</code> Start, arrows D-Pad,
+                <code> Q/E</code> L/R, <code>I/J/K/L</code> C-buttons.
+              </p>
+              <p className="online-subtle">
+                Gamepad: ABXZ, Start, shoulders, and D-Pad are captured automatically.
+                {gamepadConnected ? ' Gamepad connected.' : ' Connect a gamepad to enable capture.'}
+              </p>
+              <p className="online-subtle">
+                Analog stick movement is streamed with variable intensity for smoother remote control.
+              </p>
+              <p className="online-subtle">
+                Relay mode is optimized automatically ({guestInputRelayProfile.label}) for lower input delay and steadier stream sync.
+              </p>
+              <p className="online-subtle">
+                Smart recovery stays enabled in the background to re-sync if playback freezes.
+              </p>
+              {currentMemberInputMuted ? (
+                <p className="warning-text">Host muted your controller input. Input controls are temporarily disabled.</p>
+              ) : null}
+              <div className="online-input-grid">
+                {QUICK_INPUTS.map((entry) => (
+                  <button
+                    key={entry.label}
+                    type="button"
+                    className={activeQuickHoldControls.includes(entry.control) ? 'online-input-active' : undefined}
+                    onPointerDown={(event) => onQuickInputPointerDown(entry.control, event)}
+                    onPointerUp={() => releaseHeldQuickControl(entry.control)}
+                    onPointerCancel={() => releaseHeldQuickControl(entry.control)}
+                    onPointerLeave={() => releaseHeldQuickControl(entry.control)}
+                    onClick={() => onQuickInputClick(entry.control)}
+                    disabled={!canSendGuestControllerInput}
+                  >
+                    {entry.label}
+                  </button>
+                ))}
+              </div>
+            </>
+          ) : (
+            <p className="online-subtle">
+              Input deck is hidden for stream focus. Press <code>I</code> or click "Show Input Deck" to restore controls.
+            </p>
+          )
+        ) : (
+          <p className="online-subtle">Host input mapping and gameplay controls appear after you launch the ROM.</p>
+        )}
+      </section>
+
       {isHost ? (
         <section ref={hostControlsPanelRef} className="panel online-session-host-controls-panel">
           <div className="panel-header-inline">
-            <h2>Host Controls</h2>
-            {isCompactViewport ? (
-              <button type="button" onClick={() => setHostControlsCollapsed((value) => !value)}>
-                {hostControlsCollapsed ? 'Show Controls' : 'Hide Controls'}
-              </button>
-            ) : null}
+            <h2>Host Tools</h2>
+            <button type="button" onClick={() => setHostControlsCollapsed((value) => !value)}>
+              {hostControlsCollapsed ? 'Show Host Tools' : 'Hide Host Tools'}
+            </button>
           </div>
-          {isCompactViewport && hostControlsCollapsed ? (
-            <p className="online-subtle">Host controls collapsed. Expand when you need ROM and room management.</p>
+          {hostControlsCollapsed ? (
+            <p className="online-subtle">Host tools are hidden. Open this panel for room management, launch setup, and diagnostics.</p>
           ) : (
             <>
               <p>Share code <strong>{normalizedCode}</strong> or your invite link to have friends join instantly.</p>
@@ -4858,6 +5369,15 @@ export function OnlineSessionPage() {
               <div className="wizard-actions">
                 <button type="button" onClick={onToggleJoinLock} disabled={!canSendRealtimeInput}>
                   {roomJoinLocked ? 'Unlock Room Joins' : 'Lock Room Joins'}
+                </button>
+              </div>
+              <h3>Lobby Voice</h3>
+              <p className="online-subtle">
+                Voice chat is {session?.voiceEnabled ? 'enabled' : 'disabled'}. Guests can only unmute when enabled.
+              </p>
+              <div className="wizard-actions">
+                <button type="button" onClick={onToggleSessionVoiceEnabled} disabled={!canSendRealtimeInput}>
+                  {session?.voiceEnabled ? 'Disable Voice Chat' : 'Enable Voice Chat'}
                 </button>
               </div>
               {connectedPlayers > 1 ? (
@@ -5159,185 +5679,7 @@ export function OnlineSessionPage() {
             </>
           )}
         </section>
-      ) : (
-        <section
-          ref={guestStreamPanelRef}
-          className={`panel online-guest-stream-panel ${guestFocusMode ? 'focus' : ''} ${
-            guestStreamPriorityMode ? 'online-guest-stream-priority' : ''
-          } ${showGuestDiagnosticsPanel ? 'online-guest-diagnostics-expanded' : 'online-guest-diagnostics-compact'}`}
-        >
-          <div className={`online-guest-stage ${guestFocusMode ? 'online-guest-stage-focus' : ''}`}>
-            <div className="play-overlay-top online-guest-stage-top">
-              <div className="play-overlay-left">
-                <button type="button" className="play-menu-toggle" onClick={() => setGuestFocusMode((value) => !value)}>
-                  {guestFocusMode ? 'Disable Focus Mode' : 'Enable Focus Mode'}
-                </button>
-                <div className="play-overlay-meta">
-                  <h2>Host Stream</h2>
-                  <p>
-                    {hostStreamStatus === 'live' ? 'Live' : hostStreamStatus === 'connecting' ? 'Connecting' : 'Waiting'} •
-                    {' '}Remote Play
-                  </p>
-                </div>
-              </div>
-              <div className="play-overlay-actions online-guest-stream-actions">
-                <button
-                  type="button"
-                  onClick={() => setHostStreamMuted((value) => !value)}
-                  disabled={hostStreamStatus !== 'live'}
-                >
-                  {hostStreamMuted ? 'Unmute Stream' : 'Mute Stream'}
-                </button>
-                <button type="button" onClick={onRequestHostStreamResync} disabled={!canSendRealtimeInput}>
-                  Re-sync Stream
-                </button>
-                <button type="button" onClick={() => void onToggleGuestStreamFullscreen()}>
-                  {isGuestStreamFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}
-                </button>
-              </div>
-            </div>
-            <div className="play-stage-surface online-guest-stage-surface">
-              <div
-                ref={hostStreamShellRef}
-                className={`host-stream-shell ejs-player-host ejs-player-host-focus ${
-                  guestFocusMode ? 'host-stream-shell-focus' : ''
-                }`}
-              >
-                <video
-                  ref={hostStreamVideoRef}
-                  className="host-stream-video"
-                  autoPlay
-                  playsInline
-                  muted={hostStreamMuted}
-                  controls={false}
-                />
-                {hostStreamPlaceholderTitle ? (
-                  <div className="host-stream-placeholder">
-                    <strong>{hostStreamPlaceholderTitle}</strong>
-                    <span>{hostStreamPlaceholderHint}</span>
-                  </div>
-                ) : null}
-              </div>
-            </div>
-            <div className="play-overlay-bottom online-guest-stage-bottom">
-              {showGuestDiagnosticsPanel ? (
-                <div className="session-status-row host-stream-telemetry-row">
-                  <span className={guestNetworkHealthStatus.className}>Network: {guestNetworkHealthStatus.label}</span>
-                  <span className={guestPlaybackStatus.className}>Playback: {guestPlaybackStatus.label}</span>
-                  <span className="status-pill">Input relay: {guestInputRelayProfile.label}</span>
-                  <span className="status-pill">
-                    Bitrate:{' '}
-                    {guestStreamTelemetry.bitrateKbps !== undefined ? `${guestStreamTelemetry.bitrateKbps} kbps` : 'Measuring…'}
-                  </span>
-                  <span className="status-pill">
-                    FPS: {guestStreamTelemetry.fps !== undefined ? guestStreamTelemetry.fps.toFixed(1) : 'Measuring…'}
-                  </span>
-                </div>
-              ) : null}
-              <p className="online-subtle">{hostStreamStatusText}</p>
-              {showGuestRescueCard ? (
-                <div className="stream-quality-request-card online-rescue-card">
-                  <p>
-                    <strong>Stream needs recovery.</strong> Run rescue first, then request a stream resync if delay remains high.
-                  </p>
-                  <div className="wizard-actions">
-                    <button type="button" className="latency-rescue-button" onClick={onLatencyRescue}>
-                      Run Rescue
-                    </button>
-                    <button type="button" onClick={onRequestHostStreamResync} disabled={!canSendRealtimeInput}>
-                      Resync Now
-                    </button>
-                  </div>
-                </div>
-              ) : null}
-              <p className="online-subtle">{guestPlaybackStatus.detail}</p>
-              {advancedSessionTools ? <p className="online-subtle">{guestNetworkHealthStatus.recommendation}</p> : null}
-              {advancedSessionTools ? (
-                <p className="online-subtle">
-                  Suggested host stream mode: {HOST_STREAM_PRESET_LABELS[suggestedHostPresetForGuest]}.
-                </p>
-              ) : null}
-            </div>
-          </div>
-
-          {showGuestInputDeck ? (
-            <>
-              <h3 ref={guestInputDeckRef}>Controller Profile</h3>
-              {profiles.length > 0 ? (
-                <label>
-                  Active profile
-                  <select value={activeProfileId ?? ''} onChange={(event) => setActiveProfile(event.target.value || undefined)}>
-                    <option value="">None</option>
-                    {profiles.map((profile) => (
-                      <option key={profile.profileId} value={profile.profileId}>
-                        {profile.name}
-                        {profile.romHash ? ' (ROM-specific)' : ' (Global)'}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              ) : (
-                <p className="online-subtle">No controller profiles yet.</p>
-              )}
-              <div className="wizard-actions">
-                <button type="button" onClick={openCreateWizard}>
-                  New Profile
-                </button>
-                <button type="button" onClick={openEditWizard} disabled={!activeProfile}>
-                  Edit Active
-                </button>
-                <button type="button" onClick={openCloneWizard} disabled={!activeProfile}>
-                  Clone Active
-                </button>
-              </div>
-
-              <h3>Send Controller Input</h3>
-              <p>Use your active profile, quick taps, or virtual controller to drive the host emulator in real time.</p>
-              <p className="online-subtle">
-                Keyboard: <code>X</code> A, <code>C</code> B, <code>Z</code> Z, <code>Enter</code> Start, arrows D-Pad,
-                <code> Q/E</code> L/R, <code>I/J/K/L</code> C-buttons.
-              </p>
-              <p className="online-subtle">
-                Gamepad: ABXZ, Start, shoulders, and D-Pad are captured automatically.
-                {gamepadConnected ? ' Gamepad connected.' : ' Connect a gamepad to enable capture.'}
-              </p>
-              <p className="online-subtle">
-                Analog stick movement is streamed with variable intensity for smoother remote control.
-              </p>
-              <p className="online-subtle">
-                Relay mode is optimized automatically ({guestInputRelayProfile.label}) for lower input delay and steadier stream sync.
-              </p>
-              <p className="online-subtle">
-                Smart recovery stays enabled in the background to re-sync if playback freezes.
-              </p>
-              {currentMemberInputMuted ? (
-                <p className="warning-text">Host muted your controller input. Input controls are temporarily disabled.</p>
-              ) : null}
-              <div className="online-input-grid">
-                {QUICK_INPUTS.map((entry) => (
-                  <button
-                    key={entry.label}
-                    type="button"
-                    className={activeQuickHoldControls.includes(entry.control) ? 'online-input-active' : undefined}
-                    onPointerDown={(event) => onQuickInputPointerDown(entry.control, event)}
-                    onPointerUp={() => releaseHeldQuickControl(entry.control)}
-                    onPointerCancel={() => releaseHeldQuickControl(entry.control)}
-                    onPointerLeave={() => releaseHeldQuickControl(entry.control)}
-                    onClick={() => onQuickInputClick(entry.control)}
-                    disabled={!canSendGuestControllerInput}
-                  >
-                    {entry.label}
-                  </button>
-                ))}
-              </div>
-            </>
-          ) : (
-            <p className="online-subtle">
-              Input deck is hidden for stream focus. Press <code>I</code> or click "Show Input Deck" to restore controls.
-            </p>
-          )}
-        </section>
-      )}
+      ) : null}
 
       {showGuestSecondaryPanels ? (
         <section ref={chatPanelRef} className="panel online-session-chat-panel">

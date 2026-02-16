@@ -17,6 +17,7 @@ export interface MultiplayerSessionSnapshot {
   createdAt: number;
   hostClientId: string;
   joinLocked: boolean;
+  voiceEnabled: boolean;
   mutedInputClientIds: string[];
   romId?: string;
   romTitle?: string;

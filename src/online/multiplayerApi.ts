@@ -68,6 +68,7 @@ export async function createOnlineSession(input: {
   avatarUrl?: string;
   romId?: string;
   romTitle?: string;
+  voiceEnabled?: boolean;
 }): Promise<CreateSessionResponse> {
   const response = await fetchWithTimeout(
     multiplayerApiUrl('/api/multiplayer/sessions'),
@@ -81,6 +82,7 @@ export async function createOnlineSession(input: {
         avatarUrl: input.avatarUrl,
         romId: input.romId,
         romTitle: input.romTitle,
+        voiceEnabled: input.voiceEnabled,
       }),
     },
   );

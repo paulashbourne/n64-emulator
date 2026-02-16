@@ -53,6 +53,8 @@ export interface InputBinding {
   deviceId?: string;
   direction?: AxisDirection;
   threshold?: number;
+  axisValue?: number;
+  axisTolerance?: number;
 }
 
 export interface ControllerProfile {

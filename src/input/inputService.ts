@@ -13,12 +13,28 @@ import {
 const BUTTON_PRESS_THRESHOLD = 0.6;
 const DEFAULT_AXIS_THRESHOLD = 0.35;
 const DEFAULT_CAPTURE_TIMEOUT_MS = 20_000;
+const HAT_AXIS_STEP = 1 / 7;
+const HAT_AXIS_CAPTURE_SNAP_TOLERANCE = 0.09;
+const DEFAULT_DISCRETE_AXIS_MATCH_TOLERANCE = 0.12;
 
 function cloneDefaultInputState(): N64InputState {
   return {
     buttons: { ...DEFAULT_N64_INPUT_STATE.buttons },
     stick: { ...DEFAULT_N64_INPUT_STATE.stick },
   };
+}
+
+function detectDiscreteAxisValue(value: number): number | null {
+  if (!Number.isFinite(value) || Math.abs(value) < 0.12 || Math.abs(value) > 1) {
+    return null;
+  }
+
+  const snapped = Math.round(value / HAT_AXIS_STEP) * HAT_AXIS_STEP;
+  if (Math.abs(value - snapped) > HAT_AXIS_CAPTURE_SNAP_TOLERANCE) {
+    return null;
+  }
+
+  return Number(snapped.toFixed(6));
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -51,6 +67,10 @@ export function bindingToLabel(binding: InputBinding): string {
     return `Gamepad Button ${binding.index ?? '?'}${binding.deviceId ? ` (${binding.deviceId})` : ''}`;
   }
 
+  if (typeof binding.axisValue === 'number') {
+    return `Gamepad Axis ${binding.index ?? '?'} = ${binding.axisValue.toFixed(2)}${binding.deviceId ? ` (${binding.deviceId})` : ''}`;
+  }
+
   const direction = binding.direction === 'negative' ? '-' : '+';
   return `Gamepad Axis ${binding.index ?? '?'} ${direction}${binding.deviceId ? ` (${binding.deviceId})` : ''}`;
 }
@@ -59,6 +79,9 @@ export interface CaptureNextInputOptions {
   allowKeyboard?: boolean;
   axisThreshold?: number;
   timeoutMs?: number;
+  signal?: AbortSignal;
+  preferDiscreteAxes?: boolean;
+  waitForReleaseBinding?: InputBinding;
 }
 
 type GamepadSnapshot = {
@@ -112,12 +135,16 @@ function resolveGamepadForBinding(binding: InputBinding, gamepads: Gamepad[]): G
   return undefined;
 }
 
-function getBindingMagnitude(binding: InputBinding, keySet: Set<string>): number {
+function getBindingMagnitude(
+  binding: InputBinding,
+  keySet: Set<string>,
+  gamepadsOverride?: Gamepad[],
+): number {
   if (binding.source === 'keyboard') {
     return binding.code && keySet.has(binding.code) ? 1 : 0;
   }
 
-  const gamepads = readGamepads();
+  const gamepads = gamepadsOverride ?? readGamepads();
   const gamepad = resolveGamepadForBinding(binding, gamepads);
   if (!gamepad) {
     return 0;
@@ -126,6 +153,12 @@ function getBindingMagnitude(binding: InputBinding, keySet: Set<string>): number
   if (binding.source === 'gamepad_button') {
     const value = gamepad.buttons[binding.index ?? -1]?.value ?? 0;
     return value >= BUTTON_PRESS_THRESHOLD ? value : 0;
+  }
+
+  if (typeof binding.axisValue === 'number') {
+    const axisValue = gamepad.axes[binding.index ?? -1] ?? 0;
+    const tolerance = binding.axisTolerance ?? DEFAULT_DISCRETE_AXIS_MATCH_TOLERANCE;
+    return Math.abs(axisValue - binding.axisValue) <= tolerance ? 1 : 0;
   }
 
   const axisValue = gamepad.axes[binding.index ?? -1] ?? 0;
@@ -181,12 +214,19 @@ export async function captureNextInput(options?: CaptureNextInputOptions): Promi
   const axisThreshold = options?.axisThreshold ?? DEFAULT_AXIS_THRESHOLD;
   const allowKeyboard = options?.allowKeyboard ?? true;
   const timeoutMs = options?.timeoutMs ?? DEFAULT_CAPTURE_TIMEOUT_MS;
+  const signal = options?.signal;
+  const preferDiscreteAxes = options?.preferDiscreteAxes ?? true;
+  const waitForReleaseBinding = options?.waitForReleaseBinding;
 
   return new Promise<InputBinding>((resolve, reject) => {
     let frameHandle: number | null = null;
     let timeoutHandle: number | null = null;
+    let settled = false;
+    const pressedKeyboardKeys = new Set<string>();
+    let waitingForRelease = Boolean(waitForReleaseBinding);
 
-    const previousSnapshot = captureSnapshot(readGamepads());
+    const initialGamepads = readGamepads();
+    const previousSnapshot = captureSnapshot(initialGamepads);
 
     const cleanup = (): void => {
       if (frameHandle !== null) {
@@ -195,21 +235,50 @@ export async function captureNextInput(options?: CaptureNextInputOptions): Promi
       if (timeoutHandle !== null) {
         window.clearTimeout(timeoutHandle);
       }
-      window.removeEventListener('keydown', onKeydown);
+      window.removeEventListener('keydown', onKeydown, true);
+      window.removeEventListener('keyup', onKeyup, true);
+      signal?.removeEventListener('abort', onAbort);
+    };
+
+    const createAbortError = (): Error => {
+      const error = new Error('Input capture cancelled.');
+      error.name = 'AbortError';
+      return error;
     };
 
     const complete = (binding: InputBinding): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
       cleanup();
       resolve(binding);
     };
 
     const fail = (error: Error): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
       cleanup();
       reject(error);
     };
 
+    const onAbort = (): void => {
+      fail(createAbortError());
+    };
+
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+
     const onKeydown = (event: KeyboardEvent): void => {
       if (!allowKeyboard) {
+        return;
+      }
+      pressedKeyboardKeys.add(event.code);
+      if (waitingForRelease || event.repeat) {
         return;
       }
       event.preventDefault();
@@ -219,9 +288,35 @@ export async function captureNextInput(options?: CaptureNextInputOptions): Promi
       });
     };
 
+    const onKeyup = (event: KeyboardEvent): void => {
+      if (!allowKeyboard) {
+        return;
+      }
+      pressedKeyboardKeys.delete(event.code);
+    };
+
+    const isWaitingBindingReleased = (pads: Gamepad[]): boolean => {
+      if (!waitForReleaseBinding) {
+        return false;
+      }
+      return getBindingMagnitude(waitForReleaseBinding, pressedKeyboardKeys, pads) > 0;
+    };
+
     const poll = (): void => {
       const pads = readGamepads();
       const connectedPadIndices = new Set<number>();
+      if (waitingForRelease && isWaitingBindingReleased(pads)) {
+        for (const pad of pads) {
+          previousSnapshot.set(pad.index, {
+            buttons: pad.buttons.map((button) => button.value),
+            axes: [...pad.axes],
+            id: pad.id,
+          });
+        }
+        frameHandle = requestAnimationFrame(poll);
+        return;
+      }
+      waitingForRelease = false;
 
       for (const pad of pads) {
         connectedPadIndices.add(pad.index);
@@ -248,6 +343,23 @@ export async function captureNextInput(options?: CaptureNextInputOptions): Promi
         for (let axisIndex = 0; axisIndex < pad.axes.length; axisIndex += 1) {
           const current = pad.axes[axisIndex] ?? 0;
           const previous = previousAxes[axisIndex] ?? 0;
+
+          if (preferDiscreteAxes) {
+            const currentDiscreteValue = detectDiscreteAxisValue(current);
+            const previousDiscreteValue = detectDiscreteAxisValue(previous);
+            if (currentDiscreteValue !== null && currentDiscreteValue !== previousDiscreteValue) {
+              complete({
+                source: 'gamepad_axis',
+                index: axisIndex,
+                axisValue: currentDiscreteValue,
+                axisTolerance: DEFAULT_DISCRETE_AXIS_MATCH_TOLERANCE,
+                gamepadIndex: pad.index,
+                deviceId: pad.id,
+              });
+              return;
+            }
+          }
+
           if (Math.abs(current) < axisThreshold || Math.abs(previous) >= axisThreshold) {
             continue;
           }
@@ -283,7 +395,9 @@ export async function captureNextInput(options?: CaptureNextInputOptions): Promi
       fail(new Error('Timed out waiting for input. Try pressing a button again.'));
     }, timeoutMs);
 
-    window.addEventListener('keydown', onKeydown);
+    window.addEventListener('keydown', onKeydown, true);
+    window.addEventListener('keyup', onKeyup, true);
+    signal?.addEventListener('abort', onAbort, { once: true });
     frameHandle = requestAnimationFrame(poll);
   });
 }

@@ -65,6 +65,7 @@ const INPUT_SOURCES = new Set(['keyboard', 'gamepad_button', 'gamepad_axis']);
  *   createdAt: number;
  *   hostClientId: string;
  *   joinLocked: boolean;
+ *   voiceEnabled: boolean;
  *   mutedInputClientIds: Set<string>;
  *   romId?: string;
  *   romTitle?: string;
@@ -95,6 +96,8 @@ const INPUT_SOURCES = new Set(['keyboard', 'gamepad_button', 'gamepad_axis']);
  *     deviceId?: string;
  *     direction?: 'negative' | 'positive';
  *     threshold?: number;
+ *     axisValue?: number;
+ *     axisTolerance?: number;
  *   }>;
  *   updatedAt: number;
  * }} SharedControllerProfile
@@ -180,6 +183,15 @@ function sanitizeControllerBinding(rawBinding) {
   if (sanitized.index === undefined) {
     return null;
   }
+
+  if (typeof rawBinding.axisValue === 'number' && Number.isFinite(rawBinding.axisValue)) {
+    sanitized.axisValue = clamp(rawBinding.axisValue, -1, 1);
+    if (typeof rawBinding.axisTolerance === 'number' && Number.isFinite(rawBinding.axisTolerance)) {
+      sanitized.axisTolerance = clamp(rawBinding.axisTolerance, 0.01, 0.5);
+    }
+    return sanitized;
+  }
+
   if (rawBinding.direction === 'negative' || rawBinding.direction === 'positive') {
     sanitized.direction = rawBinding.direction;
   } else {
@@ -423,6 +435,7 @@ function publicSession(session) {
     createdAt: session.createdAt,
     hostClientId: session.hostClientId,
     joinLocked: session.joinLocked,
+    voiceEnabled: Boolean(session.voiceEnabled),
     mutedInputClientIds: [...session.mutedInputClientIds.values()],
     romId: session.romId,
     romTitle: session.romTitle,
@@ -567,6 +580,12 @@ function handleWsMessage(session, member, rawMessage) {
 
   if (message.type === 'set_join_lock' && member.isHost) {
     session.joinLocked = Boolean(message.locked);
+    broadcastRoomState(session);
+    return;
+  }
+
+  if (message.type === 'set_voice_enabled' && member.isHost) {
+    session.voiceEnabled = Boolean(message.enabled);
     broadcastRoomState(session);
     return;
   }
@@ -988,6 +1007,7 @@ const httpServer = createServer(async (req, res) => {
       const body = await readJsonBody(req);
       const hostName = sanitizeName(body.hostName, 'Host');
       const hostAvatarUrl = sanitizeAvatarUrl(body.avatarUrl);
+      const initialVoiceEnabled = typeof body.voiceEnabled === 'boolean' ? body.voiceEnabled : true;
       const code = createUniqueInviteCode();
       const hostClientId = randomUUID();
       const createdAt = Date.now();
@@ -998,6 +1018,7 @@ const httpServer = createServer(async (req, res) => {
         createdAt,
         hostClientId,
         joinLocked: false,
+        voiceEnabled: initialVoiceEnabled,
         mutedInputClientIds: new Set(),
         romId: typeof body.romId === 'string' ? body.romId : undefined,
         romTitle: typeof body.romTitle === 'string' ? body.romTitle : undefined,
@@ -1255,21 +1276,21 @@ httpServer.on('upgrade', (req, socket, head) => {
         return;
       }
 
-    if (member.isHost) {
+      if (member.isHost) {
+        member.connected = false;
+        member.socket = undefined;
+        cancelMemberDisconnectTimer(member);
+        broadcastRoomState(session);
+        scheduleSessionCloseIfHostDoesNotReturn(session);
+        return;
+      }
+
+      sendRemoteInputResetToHost(session, member, 'member_disconnected');
       member.connected = false;
       member.socket = undefined;
-      cancelMemberDisconnectTimer(member);
       broadcastRoomState(session);
-      scheduleSessionCloseIfHostDoesNotReturn(session);
-      return;
-    }
-
-    sendRemoteInputResetToHost(session, member, 'member_disconnected');
-    member.connected = false;
-    member.socket = undefined;
-    broadcastRoomState(session);
-    scheduleMemberRemovalIfNotReconnected(session, member);
-  });
+      scheduleMemberRemovalIfNotReconnected(session, member);
+    });
   });
 });
 

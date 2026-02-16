@@ -82,6 +82,7 @@ describe('app store profile defaults', () => {
 
     const switchProfile = profiles.find((profile) => profile.profileId === 'profile:gamepad-switch');
     const xboxProfile = profiles.find((profile) => profile.profileId === 'profile:gamepad-xbox-series');
+    const bitdoProfile = profiles.find((profile) => profile.profileId === 'profile:gamepad-8bitdo-64');
 
     expect(switchProfile?.bindings.a?.source).toBe('gamepad_button');
     expect(switchProfile?.bindings.a?.index).toBe(1);
@@ -92,6 +93,14 @@ describe('app store profile defaults', () => {
     expect(xboxProfile?.bindings.a?.source).toBe('gamepad_button');
     expect(xboxProfile?.bindings.a?.index).toBe(0);
     expect(xboxProfile?.bindings.b?.index).toBe(1);
+
+    expect(bitdoProfile?.bindings.z?.source).toBe('gamepad_button');
+    expect(bitdoProfile?.bindings.z?.index).toBe(8);
+    expect(bitdoProfile?.bindings.start?.index).toBe(11);
+    expect(bitdoProfile?.bindings.dpad_up?.source).toBe('gamepad_axis');
+    expect(bitdoProfile?.bindings.dpad_up?.index).toBe(9);
+    expect(bitdoProfile?.bindings.dpad_up?.axisValue).toBe(-1);
+    expect(bitdoProfile?.bindings.dpad_right?.axisValue).toBeCloseTo(-3 / 7, 6);
   });
 
   test('built-in profiles are not duplicated across loads', async () => {
@@ -103,6 +112,38 @@ describe('app store profile defaults', () => {
       const defaults = allProfiles.filter((profile) => profile.profileId === builtInId);
       expect(defaults).toHaveLength(1);
     }
+  });
+
+  test('upgrades legacy 8BitDo default profile mapping to hat-axis d-pad defaults', async () => {
+    await db.profiles.put({
+      profileId: 'profile:gamepad-8bitdo-64',
+      name: '8BitDo 64 Bluetooth Controller',
+      deviceId: 'preset-8bitdo-64-controller',
+      deadzone: 0.2,
+      bindings: {
+        a: { source: 'gamepad_button', index: 1 },
+        b: { source: 'gamepad_button', index: 0 },
+        z: { source: 'gamepad_button', index: 6 },
+        start: { source: 'gamepad_button', index: 9 },
+        l: { source: 'gamepad_button', index: 4 },
+        r: { source: 'gamepad_button', index: 5 },
+        dpad_up: { source: 'gamepad_button', index: 12 },
+        dpad_down: { source: 'gamepad_button', index: 13 },
+        dpad_left: { source: 'gamepad_button', index: 14 },
+        dpad_right: { source: 'gamepad_button', index: 15 },
+      },
+      updatedAt: Date.now() - 1_000,
+    });
+
+    await useAppStore.getState().loadProfiles();
+    const upgraded = useAppStore.getState().profiles.find((profile) => profile.profileId === 'profile:gamepad-8bitdo-64');
+
+    expect(upgraded?.bindings.start?.index).toBe(11);
+    expect(upgraded?.bindings.z?.index).toBe(8);
+    expect(upgraded?.bindings.dpad_up?.source).toBe('gamepad_axis');
+    expect(upgraded?.bindings.dpad_up?.index).toBe(9);
+    expect(upgraded?.bindings.dpad_up?.axisValue).toBe(-1);
+    expect(upgraded?.bindings.dpad_right?.axisValue).toBeCloseTo(-3 / 7, 6);
   });
 
   test('saved profiles are normalized to global scope', async () => {

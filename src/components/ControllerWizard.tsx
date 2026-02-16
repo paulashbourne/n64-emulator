@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 
 import {
@@ -15,7 +15,8 @@ import {
   type MappingWizardState,
 } from '../input/mappingWizard';
 import { bindingToLabel, captureNextInput, controlPrompt } from '../input/inputService';
-import type { ControllerProfile } from '../types/input';
+import { CONTROL_LABELS, isAnalogTarget } from '../types/input';
+import type { ControllerProfile, InputBinding } from '../types/input';
 
 type ControllerWizardSaveMode = 'create' | 'edit';
 
@@ -53,45 +54,157 @@ export function ControllerWizard({
   const [isCapturing, setIsCapturing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string>();
+  const captureAbortRef = useRef<AbortController | null>(null);
+  const lastCapturedBindingRef = useRef<InputBinding | undefined>(undefined);
+  const captureInFlightRef = useRef(false);
 
   const target = currentTarget(wizardState);
   const complete = isWizardComplete(wizardState);
   const progress = wizardProgress(wizardState);
   const summary = useMemo(() => mappingSummary(wizardState), [wizardState]);
 
-  const onCapture = async (): Promise<void> => {
+  const stopCapture = useCallback((): void => {
+    if (captureAbortRef.current) {
+      captureAbortRef.current.abort();
+      captureAbortRef.current = null;
+    }
+    captureInFlightRef.current = false;
+    setIsCapturing(false);
+  }, []);
+
+  const onCapture = useCallback(async (): Promise<void> => {
+    if (!target || isSaving || isCapturing || captureInFlightRef.current) {
+      return;
+    }
+
+    captureInFlightRef.current = true;
     setError(undefined);
     setIsCapturing(true);
+    const captureController = new AbortController();
+    captureAbortRef.current = captureController;
 
     try {
-      const binding = await captureNextInput({ allowKeyboard: true });
+      const binding = await captureNextInput({
+        allowKeyboard: true,
+        preferDiscreteAxes: !isAnalogTarget(target),
+        signal: captureController.signal,
+        waitForReleaseBinding: lastCapturedBindingRef.current,
+      });
+
+      if (captureController.signal.aborted) {
+        return;
+      }
+
+      lastCapturedBindingRef.current = binding;
       setWizardState((state) => assignBindingAndAdvance(state, binding));
     } catch (captureError) {
+      if (captureError instanceof Error && captureError.name === 'AbortError') {
+        return;
+      }
       const message = captureError instanceof Error ? captureError.message : 'Failed to capture input.';
       setError(message);
     } finally {
-      setIsCapturing(false);
+      captureInFlightRef.current = false;
+      if (captureAbortRef.current === captureController) {
+        captureAbortRef.current = null;
+        setIsCapturing(false);
+      }
     }
-  };
+  }, [isCapturing, isSaving, target]);
+
+  useEffect(() => {
+    if (!target || isSaving || isCapturing) {
+      return;
+    }
+    void onCapture();
+  }, [isCapturing, isSaving, onCapture, target]);
+
+  useEffect(() => {
+    const onGlobalKeyDown = (event: KeyboardEvent): void => {
+      const targetElement = event.target as HTMLElement | null;
+      if (
+        targetElement &&
+        (targetElement.tagName === 'INPUT' ||
+          targetElement.tagName === 'TEXTAREA' ||
+          targetElement.tagName === 'SELECT' ||
+          targetElement.isContentEditable)
+      ) {
+        return;
+      }
+
+      if (event.code === 'Escape') {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+    };
+
+    const onGlobalKeyUp = (event: KeyboardEvent): void => {
+      const targetElement = event.target as HTMLElement | null;
+      if (
+        targetElement &&
+        (targetElement.tagName === 'INPUT' ||
+          targetElement.tagName === 'TEXTAREA' ||
+          targetElement.tagName === 'SELECT' ||
+          targetElement.isContentEditable)
+      ) {
+        return;
+      }
+
+      if (event.code === 'Escape') {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+    };
+
+    window.addEventListener('keydown', onGlobalKeyDown, true);
+    window.addEventListener('keyup', onGlobalKeyUp, true);
+    return () => {
+      window.removeEventListener('keydown', onGlobalKeyDown, true);
+      window.removeEventListener('keyup', onGlobalKeyUp, true);
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      stopCapture();
+    };
+  }, [stopCapture]);
 
   const onBack = (): void => {
     setError(undefined);
+    stopCapture();
+    lastCapturedBindingRef.current = undefined;
     setWizardState((state) => goBack(state));
   };
 
   const onSkip = (): void => {
     setError(undefined);
+    stopCapture();
+    lastCapturedBindingRef.current = undefined;
     setWizardState((state) => skipCurrentTarget(state));
   };
 
   const onReset = (): void => {
     setError(undefined);
+    stopCapture();
+    lastCapturedBindingRef.current = undefined;
     setWizardState(resetWizard());
   };
 
   const onApplyKeyboardPreset = (): void => {
     setError(undefined);
+    lastCapturedBindingRef.current = undefined;
     setWizardState(applyKeyboardPreset());
+  };
+
+  const onCancelWizard = (): void => {
+    stopCapture();
+    lastCapturedBindingRef.current = undefined;
+    onCancel();
   };
 
   const onSave = async (event: FormEvent): Promise<void> => {
@@ -150,15 +263,18 @@ export function ControllerWizard({
           {target ? (
             <>
               <h3>{controlPrompt(target)}</h3>
-              <p>Current target: <strong>{target}</strong></p>
+              <p>Current target: <strong>{CONTROL_LABELS[target]}</strong></p>
+              <p className="wizard-preset-hint">
+                {isCapturing ? 'Listening now. Press the button you want mapped.' : 'Capture paused. Press recapture to listen again.'}
+              </p>
               <div className="wizard-actions">
                 <button type="button" onClick={onCapture} disabled={isCapturing || isSaving}>
-                  {isCapturing ? 'Listening…' : 'Capture Input'}
+                  {isCapturing ? 'Listening…' : 'Recapture Input'}
                 </button>
                 <button type="button" onClick={onBack} disabled={isCapturing || isSaving || wizardState.stepIndex === 0}>
                   Back
                 </button>
-                <button type="button" onClick={onSkip} disabled={isCapturing || isSaving}>
+                <button type="button" onClick={onSkip} disabled={isSaving}>
                   Skip
                 </button>
                 <button type="button" onClick={onReset} disabled={isCapturing || isSaving}>
@@ -224,7 +340,7 @@ export function ControllerWizard({
           <button type="submit" disabled={!complete || isSaving || isCapturing}>
             {isSaving ? 'Saving…' : effectiveSaveMode === 'edit' ? 'Update Profile' : 'Save Profile'}
           </button>
-          <button type="button" onClick={onCancel} disabled={isSaving || isCapturing}>
+          <button type="button" onClick={onCancelWizard} disabled={isSaving || isCapturing}>
             Close
           </button>
         </div>

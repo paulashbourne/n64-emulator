@@ -69,7 +69,7 @@ const ONLINE_HOST_DIAGNOSTICS_PREFERENCES_KEY = 'online_host_diagnostics_prefs_v
 const ONLINE_HOST_ADVANCED_TOOLS_PREFERENCES_KEY = 'play_online_host_advanced_tools_v2';
 const PLAY_HUD_AUTO_HIDE_DELAY_MS = 3_200;
 const SAVE_AUTOSYNC_INTERVAL_MS = 20_000;
-const PLAY_COMPACT_HUD_MAX_WIDTH = 720;
+const PLAY_COMPACT_HUD_MAX_WIDTH = 980;
 
 type SessionStatus = 'loading' | 'running' | 'paused' | 'error';
 type WizardMode = 'create' | 'edit';
@@ -273,6 +273,26 @@ function saveOnlineHostAdvancedToolsPreference(enabled: boolean): void {
   }
 }
 
+function readPlayViewportState(): {
+  coarsePointer: boolean;
+  compactHud: boolean;
+} {
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
+    return {
+      coarsePointer: false,
+      compactHud: false,
+    };
+  }
+
+  const coarsePointer = window.matchMedia('(hover: none), (pointer: coarse)').matches;
+  const viewportWidth = window.innerWidth;
+  const compactHud = viewportWidth <= PLAY_COMPACT_HUD_MAX_WIDTH;
+  return {
+    coarsePointer,
+    compactHud,
+  };
+}
+
 function revokeRomBlobUrl(ref: MutableRefObject<string | null>): void {
   if (!ref.current) {
     return;
@@ -304,6 +324,7 @@ function normalizeOnlineSessionSnapshot(session: MultiplayerSessionSnapshot): Mu
   return {
     ...session,
     joinLocked: Boolean((session as { joinLocked?: unknown }).joinLocked),
+    voiceEnabled: Boolean((session as { voiceEnabled?: unknown }).voiceEnabled),
     chat: Array.isArray((session as { chat?: unknown }).chat) ? session.chat : [],
     mutedInputClientIds: Array.isArray((session as { mutedInputClientIds?: unknown }).mutedInputClientIds)
       ? (session as { mutedInputClientIds: string[] }).mutedInputClientIds
@@ -572,6 +593,7 @@ export function PlayPage() {
     () => loadOnlineHostDiagnosticsPreferences(),
     [],
   );
+  const initialViewportState = useMemo(() => readPlayViewportState(), []);
 
   const romBlobUrlRef = useRef<string | null>(null);
   const lastAppliedProfileRef = useRef<string | null>(null);
@@ -584,6 +606,7 @@ export function PlayPage() {
   const onlinePendingPingSentAtRef = useRef<number | null>(null);
   const onlineSessionClosedRef = useRef(false);
   const hudAutoHideTimerRef = useRef<number | null>(null);
+  const wizardAutoPausedRef = useRef(false);
   const onlineHostStreamRef = useRef<MediaStream | null>(null);
   const onlineHostPeersRef = useRef<Map<string, HostStreamingPeerState>>(new Map());
   const onlineHostStatsBaselineRef = useRef<Map<string, { bytesSent: number; measuredAtMs: number }>>(new Map());
@@ -631,22 +654,12 @@ export function PlayPage() {
     () => loadPlayViewPreferences().autoHideHudWhileRunning,
   );
   const [showVirtualController, setShowVirtualController] = useState(() =>
-    typeof window !== 'undefined' && typeof window.matchMedia === 'function'
-      ? window.matchMedia('(hover: none), (pointer: coarse)').matches
-      : false,
+    initialViewportState.coarsePointer,
   );
   const [virtualControllerMode, setVirtualControllerMode] = useState<'full' | 'compact'>(() =>
-    typeof window !== 'undefined' && typeof window.matchMedia === 'function'
-      ? window.matchMedia('(hover: none), (pointer: coarse)').matches
-        ? 'full'
-        : 'compact'
-      : 'compact',
+    'compact',
   );
-  const [isCompactHudViewport, setIsCompactHudViewport] = useState(() =>
-    typeof window !== 'undefined' && typeof window.matchMedia === 'function'
-      ? window.matchMedia(`(max-width: ${PLAY_COMPACT_HUD_MAX_WIDTH}px)`).matches
-      : false,
-  );
+  const [isCompactHudViewport, setIsCompactHudViewport] = useState(() => initialViewportState.compactHud);
   const [compactActionTrayOpen, setCompactActionTrayOpen] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [bootMode, setBootMode] = useState<EmulatorBootMode>('auto');
@@ -980,6 +993,12 @@ export function PlayPage() {
       setCompactActionTrayOpen(false);
     }
   }, [isCompactHudViewport]);
+
+  useEffect(() => {
+    if (isCompactHudViewport && virtualControllerMode !== 'compact') {
+      setVirtualControllerMode('compact');
+    }
+  }, [isCompactHudViewport, virtualControllerMode]);
 
   useEffect(() => {
     if (menuOpen || wizardOpen || status === 'loading' || status === 'error') {
@@ -2806,6 +2825,33 @@ export function PlayPage() {
   };
 
   useEffect(() => {
+    if (status === 'loading' || status === 'error') {
+      wizardAutoPausedRef.current = false;
+      return;
+    }
+
+    const emulator = window.EJS_emulator;
+    if (!emulator) {
+      return;
+    }
+
+    if (wizardOpen) {
+      if (status === 'running') {
+        emulator.pause?.();
+        wizardAutoPausedRef.current = true;
+        setStatus('paused');
+      }
+      return;
+    }
+
+    if (wizardAutoPausedRef.current && status === 'paused') {
+      emulator.play?.();
+      setStatus('running');
+    }
+    wizardAutoPausedRef.current = false;
+  }, [status, wizardOpen]);
+
+  useEffect(() => {
     const togglePause = (): void => {
       const emulator = window.EJS_emulator;
       if (!emulator) {
@@ -2845,6 +2891,11 @@ export function PlayPage() {
         setWizardOpen(false);
         setWizardMode('create');
         setWizardTemplateProfile(undefined);
+        return;
+      }
+
+      if (wizardOpen) {
+        event.preventDefault();
         return;
       }
 
@@ -3174,7 +3225,7 @@ export function PlayPage() {
                   : 'Show Virtual Controller'
                 : 'Virtual Controller Unavailable'}
             </button>
-            {showVirtualController && isGameInteractive ? (
+            {showVirtualController && isGameInteractive && !isCompactHudViewport ? (
               <button
                 type="button"
                 onClick={() => setVirtualControllerMode((value) => (value === 'full' ? 'compact' : 'full'))}

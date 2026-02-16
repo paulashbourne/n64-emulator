@@ -294,3 +294,41 @@ If guests report flashing/reconnect churn:
 - Add profile versioning/import-export UX once calibration stabilizes
 - Consider moving shared profile persistence from JSON file to managed DB only if multi-instance scaling becomes necessary
 
+## 15) Mandatory Dev Runtime (tmux)
+
+When Codex is developing in this repo, it must always maintain a tmux session named `n64` with two panes:
+
+1. Pane 0 named `frontend` running the frontend dev server with auto-reload.
+2. Pane 1 named `backend` running the multiplayer backend dev server with auto-reload.
+
+### Required behavior
+
+- Codex must start/repair this tmux session automatically at the beginning of development work.
+- Codex must keep both servers running for the full duration of development so local testing is always available.
+- Before ending every turn, Codex must verify both tmux panes are alive and still running expected commands.
+- If either server is down, Codex must restart it before ending the turn.
+
+### Canonical commands
+
+Use this layout/boot sequence (or equivalent):
+
+```bash
+cd /Users/paul/git/paulashbourne/n64-emulator
+tmux has-session -t n64 2>/dev/null || tmux new-session -d -s n64 -n dev
+tmux list-panes -t n64 | grep -q . || tmux split-window -t n64
+tmux select-layout -t n64 tiled
+tmux select-pane -t n64.0 -T frontend
+tmux select-pane -t n64.1 -T backend
+tmux send-keys -t n64.0 "cd /Users/paul/git/paulashbourne/n64-emulator && npm run dev -- --host 127.0.0.1 --port 5173 --strictPort" C-m
+tmux send-keys -t n64.1 "cd /Users/paul/git/paulashbourne/n64-emulator && npm run dev:multiplayer" C-m
+```
+
+### End-of-turn health check (required)
+
+At minimum, confirm:
+
+- tmux session `n64` exists,
+- pane `frontend` process is running (`npm run dev`/Vite),
+- pane `backend` process is running (`npm run dev:multiplayer`),
+- frontend responds on `http://127.0.0.1:5173`,
+- backend health responds on `http://127.0.0.1:8787/health`.

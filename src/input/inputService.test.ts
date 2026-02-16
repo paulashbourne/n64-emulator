@@ -179,6 +179,29 @@ describe('input service', () => {
     expect(state.stick.x).toBeGreaterThan(0.6);
   });
 
+  test('supports discrete axis-value bindings for hat-style D-pad inputs', () => {
+    const profile = makeProfile({
+      deadzone: 0,
+      bindings: {
+        dpad_right: {
+          source: 'gamepad_axis',
+          index: 9,
+          axisValue: -3 / 7,
+          axisTolerance: 0.12,
+        },
+      },
+    });
+
+    setMockGamepads([{ id: '8BitDo 64 BT', index: 0, axes: [0, 0, 0, 0, 0, 0, 0, 0, 0, -0.42857] }]);
+    const activeState = buildInputStateFromProfile(profile, new Set());
+
+    setMockGamepads([{ id: '8BitDo 64 BT', index: 0, axes: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0] }]);
+    const neutralState = buildInputStateFromProfile(profile, new Set());
+
+    expect(activeState.buttons.dpad_right).toBe(true);
+    expect(neutralState.buttons.dpad_right).toBe(false);
+  });
+
   test('capture can detect a button press even if the button was held at capture start', async () => {
     setMockGamepadSequence([
       { id: 'Pad 1', index: 0, axes: [0], buttons: [1] },
@@ -212,6 +235,7 @@ describe('input service', () => {
       allowKeyboard: false,
       timeoutMs: 500,
       axisThreshold: 0.35,
+      preferDiscreteAxes: false,
     });
 
     await flushAnimationFrames(rafQueue, 2);
@@ -222,6 +246,74 @@ describe('input service', () => {
       direction: 'negative',
       gamepadIndex: 0,
       deviceId: 'Pad 1',
+    });
+  });
+
+  test('capture waits for the previous binding to be released before accepting the next input', async () => {
+    setMockGamepadSequence([
+      { id: 'Pad 1', index: 0, axes: [0], buttons: [1] },
+      { id: 'Pad 1', index: 0, axes: [0], buttons: [1] },
+      { id: 'Pad 1', index: 0, axes: [0], buttons: [0] },
+      { id: 'Pad 1', index: 0, axes: [0], buttons: [1] },
+    ]);
+
+    const capturePromise = captureNextInput({
+      allowKeyboard: false,
+      timeoutMs: 500,
+      waitForReleaseBinding: {
+        source: 'gamepad_button',
+        index: 0,
+        gamepadIndex: 0,
+        deviceId: 'Pad 1',
+      },
+    });
+
+    await flushAnimationFrames(rafQueue, 3);
+
+    await expect(capturePromise).resolves.toMatchObject({
+      source: 'gamepad_button',
+      index: 0,
+      gamepadIndex: 0,
+      deviceId: 'Pad 1',
+    });
+  });
+
+  test('capture ignores repeated keydown events while waiting for a fresh press', async () => {
+    const abortController = new AbortController();
+    const capturePromise = captureNextInput({
+      allowKeyboard: true,
+      timeoutMs: 500,
+      signal: abortController.signal,
+    });
+
+    window.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        code: 'KeyX',
+        repeat: true,
+      }),
+    );
+    await Promise.resolve();
+    abortController.abort();
+
+    await expect(capturePromise).rejects.toMatchObject({
+      name: 'AbortError',
+    });
+  });
+
+  test('capture can be aborted while listening for input', async () => {
+    setMockGamepadSequence([{ id: 'Pad 1', index: 0, axes: [0], buttons: [] }]);
+    const abortController = new AbortController();
+    const capturePromise = captureNextInput({
+      allowKeyboard: false,
+      timeoutMs: 500,
+      signal: abortController.signal,
+    });
+
+    await flushAnimationFrames(rafQueue, 1);
+    abortController.abort();
+
+    await expect(capturePromise).rejects.toMatchObject({
+      name: 'AbortError',
     });
   });
 });

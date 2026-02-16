@@ -191,7 +191,18 @@ export function VirtualController({
   };
 
   return (
-    <section className={`virtual-controller ${mode === 'compact' ? 'compact' : ''}`} aria-label="Virtual controller">
+    <section
+      className={`virtual-controller ${mode === 'compact' ? 'compact' : ''} ${
+        stickVector.x !== 0 || stickVector.y !== 0 ? 'vc-stick-active' : ''
+      }`}
+      aria-label="Virtual controller"
+    >
+      <div className="vc-shell-art" aria-hidden="true">
+        <div className="vc-shell-mark vc-shell-mark-left" />
+        <div className="vc-shell-mark vc-shell-mark-center" />
+        <div className="vc-shell-mark vc-shell-mark-right" />
+      </div>
+
       <div className="vc-shoulders">
         <button type="button" {...bindControl('l', 'vc-shoulder vc-shoulder-l')}>
           L
@@ -205,7 +216,7 @@ export function VirtualController({
       </div>
 
       <div className="vc-main">
-        <div className="vc-left-column">
+        <div className="vc-left-column vc-wing vc-wing-left">
           <div className="vc-dpad-cluster" aria-label="D-pad">
             <button type="button" {...bindControl('dpad_up', 'vc-dpad-button vc-dpad-up', 'D-Pad Up')}>
               <span aria-hidden="true">↑</span>
@@ -220,7 +231,9 @@ export function VirtualController({
               <span aria-hidden="true">↓</span>
             </button>
           </div>
+        </div>
 
+        <div className="vc-center-column vc-wing vc-wing-center">
           <div className="vc-analog-cluster">
             <div
               ref={stickPadRef}
@@ -272,29 +285,38 @@ export function VirtualController({
                 }}
               />
             </div>
-            {mode === 'full' ? <p className="vc-stick-readout">Stick X {stickVector.x.toFixed(2)} / Y {stickVector.y.toFixed(2)}</p> : null}
           </div>
-        </div>
-
-        <div className="vc-center-column">
           <button type="button" {...bindControl('start', 'vc-start-button')}>
             Start
           </button>
+          {mode === 'full' ? <p className="vc-stick-readout">Stick X {stickVector.x.toFixed(2)} / Y {stickVector.y.toFixed(2)}</p> : null}
         </div>
 
-        <div className="vc-right-column">
+        <div className="vc-right-column vc-wing vc-wing-right">
           <div className="vc-c-cluster" aria-label="C-buttons">
             <button type="button" {...bindControl('c_up', 'vc-c-button vc-c-up', 'C-Up')}>
-              C↑
+              <span className="vc-c-glyph" aria-hidden="true">
+                <span className="vc-c-letter">C</span>
+                <span className="vc-c-arrow">↑</span>
+              </span>
             </button>
             <button type="button" {...bindControl('c_left', 'vc-c-button vc-c-left', 'C-Left')}>
-              C←
+              <span className="vc-c-glyph" aria-hidden="true">
+                <span className="vc-c-letter">C</span>
+                <span className="vc-c-arrow">←</span>
+              </span>
             </button>
             <button type="button" {...bindControl('c_right', 'vc-c-button vc-c-right', 'C-Right')}>
-              C→
+              <span className="vc-c-glyph" aria-hidden="true">
+                <span className="vc-c-letter">C</span>
+                <span className="vc-c-arrow">→</span>
+              </span>
             </button>
             <button type="button" {...bindControl('c_down', 'vc-c-button vc-c-down', 'C-Down')}>
-              C↓
+              <span className="vc-c-glyph" aria-hidden="true">
+                <span className="vc-c-letter">C</span>
+                <span className="vc-c-arrow">↓</span>
+              </span>
             </button>
           </div>
 

@@ -124,6 +124,7 @@ export function OnlinePage() {
   const [identityAvatarUrl, setIdentityAvatarUrl] = useState('');
   const [identitySaving, setIdentitySaving] = useState(false);
   const [selectedRomId, setSelectedRomId] = useState<string>(NO_ROM_SELECTED);
+  const [hostVoiceEnabled, setHostVoiceEnabled] = useState(true);
   const initialInviteValue = searchParams.get('code') ?? '';
   const initialInviteCode = extractInviteCodeInput(initialInviteValue);
   const [joinCodeInput, setJoinCodeInput] = useState(initialInviteCode || initialInviteValue);
@@ -304,6 +305,7 @@ export function OnlinePage() {
         avatarUrl,
         romId: selectedRom?.id,
         romTitle: selectedRom?.title,
+        voiceEnabled: hostVoiceEnabled,
       });
       try {
         await rememberOnlineSession({
@@ -588,24 +590,76 @@ export function OnlinePage() {
   return (
     <section className="online-page">
       <header className="panel online-hero-panel">
-        <h1>Online Multiplayer</h1>
-        <p>Host runs the ROM as Player 1. Friends join with an invite code and take slots 2-4.</p>
-        <p>
-          <strong>Architecture:</strong> central coordinator + host-authoritative input relay.
-        </p>
-        <div className="online-overview-pills" aria-label="Online multiplayer overview">
-          <span className="status-pill status-good">Host-authoritative stream</span>
-          <span className="status-pill">Invite code join</span>
-          <span className="status-pill">Up to 4 players</span>
+        <div className="online-hero-grid">
+          <div className="online-hero-copy">
+            <h1>Online Multiplayer</h1>
+            <p>Host runs the ROM as Player 1. Friends join with an invite code and take slots 2-4.</p>
+            <p className="online-subtle">Same-room feel with host-authoritative input relay.</p>
+            <div className="online-overview-pills" aria-label="Online multiplayer overview">
+              <span className="status-pill status-good">Host-authoritative stream</span>
+              <span className="status-pill">Invite code join</span>
+              <span className="status-pill">Up to 4 players</span>
+              <span className="status-pill">Voice chat optional</span>
+            </div>
+          </div>
+
+          <aside className="online-hero-quickstart" aria-label="Online quick start actions">
+            <h2>Quick Start</h2>
+            <p>Start or join fast, then move into the live room for stream and voice.</p>
+            <div className="wizard-actions online-hero-actions">
+              <a href="#online-start-card" className="preset-button online-hero-action-primary">
+                Host a Game
+              </a>
+              <a href="#online-join-card" className="online-hero-action-secondary">
+                Join a Game
+              </a>
+              <Link to="/" className="online-hero-action-secondary">
+                Open Library
+              </Link>
+              {mostRecentHostSession ? (
+                <button
+                  type="button"
+                  className="online-hero-action-secondary"
+                  onClick={() => void onReopenSession(mostRecentHostSession)}
+                  disabled={Boolean(reopeningSessionKey)}
+                >
+                  Resume Last Host Room
+                </button>
+              ) : null}
+              {mostRecentHostSession ? (
+                <button
+                  type="button"
+                  className="online-hero-action-secondary"
+                  onClick={() => void onCopyRecentInviteLink(mostRecentHostSession)}
+                  disabled={Boolean(reopeningSessionKey)}
+                >
+                  Copy Join Link
+                </button>
+              ) : null}
+            </div>
+            <p className="online-subtle">
+              Current profile: <strong>{normalizePlayerName(identityName, 'Player')}</strong>
+            </p>
+          </aside>
         </div>
         {error ? <p className="error-text">{error}</p> : null}
         {recentSessionsWarning ? <p className="warning-text">{recentSessionsWarning}</p> : null}
         {recentSessionsInfo ? <p className="online-subtle">{recentSessionsInfo}</p> : null}
       </header>
 
-      <section className="panel online-identity-panel">
-        <h2>Player Profile</h2>
-        <p>Your name and avatar are auto-used when starting, joining, and reopening sessions.</p>
+      <section id="online-profile-card" className="panel online-identity-panel">
+        <div className="online-section-headline">
+          <h2>Player Profile</h2>
+          <span className="status-pill">Auto-used for host/join/reopen</span>
+        </div>
+        <p className="online-subtle">Your name and avatar are auto-used when starting, joining, and reopening sessions.</p>
+        <div className="online-identity-head">
+          <OnlineAvatar name={identityName} avatarUrl={identityAvatarUrl} className="online-avatar-preview" />
+          <div>
+            <p className="online-identity-name">{normalizePlayerName(identityName, 'Player')}</p>
+            <p className="online-subtle">Saved locally on this device.</p>
+          </div>
+        </div>
         <div className="online-form-grid">
           <label>
             Display Name
@@ -627,16 +681,13 @@ export function OnlinePage() {
             />
           </label>
         </div>
-        <div className="wizard-actions">
-          <OnlineAvatar name={identityName} avatarUrl={identityAvatarUrl} className="online-avatar-preview" />
-          <input
-            ref={avatarFileInputRef}
-            type="file"
-            accept="image/png,image/jpeg,image/webp,image/gif"
-            onChange={(event) => void onAvatarFileSelected(event)}
-            hidden
-          />
-        </div>
+        <input
+          ref={avatarFileInputRef}
+          type="file"
+          accept="image/png,image/jpeg,image/webp,image/gif"
+          onChange={(event) => void onAvatarFileSelected(event)}
+          hidden
+        />
         <div className="wizard-actions online-identity-actions">
           <button type="button" onClick={() => void onSaveIdentity()} disabled={identitySaving}>
             {identitySaving ? 'Saving…' : 'Save Profile'}
@@ -665,7 +716,8 @@ export function OnlinePage() {
       </section>
 
       <div className="online-page-grid">
-        <section className="panel online-card">
+        <section id="online-start-card" className="panel online-card online-card-host">
+          <p className="online-card-kicker">Host</p>
           <h2>Start Game</h2>
           <p>Create a session, share the invite code, then launch your ROM as host.</p>
           <form
@@ -706,12 +758,22 @@ export function OnlinePage() {
                 ? `Session will preselect "${selectedRom.title}".`
                 : 'No ROM preselected. You can choose one after session creation.'}
             </p>
+            <label className="checkbox-label">
+              <input
+                type="checkbox"
+                checked={hostVoiceEnabled}
+                onChange={(event) => setHostVoiceEnabled(event.target.checked)}
+                disabled={creating || joining}
+              />
+              Enable lobby voice chat (players start muted and can unmute themselves)
+            </label>
             <div className="wizard-actions online-form-actions">
-              <button type="submit" disabled={creating || joining}>
+              <button type="submit" className="preset-button online-action-primary" disabled={creating || joining}>
                 {creating ? 'Creating…' : 'Start Online Game'}
               </button>
               <button
                 type="button"
+                className="online-action-secondary"
                 onClick={() => setHostName(normalizePlayerName(identityName, 'Player 1'))}
                 disabled={creating || joining}
               >
@@ -720,18 +782,32 @@ export function OnlinePage() {
               {mostRecentHostSession ? (
                 <button
                   type="button"
+                  className="online-action-secondary"
                   onClick={() => void onReopenSession(mostRecentHostSession)}
                   disabled={Boolean(reopeningSessionKey)}
                 >
                   Resume Last Host Room
                 </button>
               ) : null}
-              <Link to="/">Back to Library</Link>
+              {mostRecentHostSession ? (
+                <button
+                  type="button"
+                  className="online-action-secondary"
+                  onClick={() => void onCopyRecentInviteLink(mostRecentHostSession)}
+                  disabled={Boolean(reopeningSessionKey)}
+                >
+                  Copy Join Link
+                </button>
+              ) : null}
+              <Link to="/" className="online-action-link">
+                Back to Library
+              </Link>
             </div>
           </form>
         </section>
 
-        <section className="panel online-card">
+        <section id="online-join-card" className="panel online-card online-card-join">
+          <p className="online-card-kicker">Guest</p>
           <h2>Join Game</h2>
           <p>Enter your friend&apos;s invite code to join as the next available player slot.</p>
           <form
@@ -782,14 +858,24 @@ export function OnlinePage() {
               <span className={joinCodeFeedback.tone}>{joinCodeFeedback.text}</span>
             </div>
             <div className="wizard-actions online-form-actions">
-              <button type="submit" disabled={joining || creating || normalizedJoinCode.length !== 6}>
+              <button
+                type="submit"
+                className="preset-button online-action-primary"
+                disabled={joining || creating || normalizedJoinCode.length !== 6}
+              >
                 {joining ? 'Joining…' : 'Join by Invite Code'}
               </button>
-              <button type="button" onClick={() => void onPasteInviteFromClipboard()} disabled={joining || creating}>
+              <button
+                type="button"
+                className="online-action-secondary"
+                onClick={() => void onPasteInviteFromClipboard()}
+                disabled={joining || creating}
+              >
                 Paste Invite
               </button>
               <button
                 type="button"
+                className="online-action-secondary"
                 onClick={() => setJoinName(normalizePlayerName(identityName, 'Player'))}
                 disabled={joining || creating}
               >
@@ -800,8 +886,11 @@ export function OnlinePage() {
         </section>
       </div>
 
-      <section className="panel">
-        <h2>Recent Sessions</h2>
+      <section id="online-recent-card" className="panel online-recent-panel">
+        <div className="online-section-headline">
+          <h2>Recent Sessions</h2>
+          {recentSessions.length > 0 ? <span className="status-pill">{recentSessions.length} saved</span> : null}
+        </div>
         {recentSessions.length > 0 ? (
           <div className="session-status-row recent-session-summary">
             <span className="status-pill">

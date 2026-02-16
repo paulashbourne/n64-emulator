@@ -6,6 +6,11 @@ const N64_CORE_CANDIDATES = ['parallel_n64', 'mupen64plus_next'] as const;
 type N64CoreId = (typeof N64_CORE_CANDIDATES)[number];
 
 const LOADER_SCRIPT_ATTR = 'data-ejs-loader';
+const BUILT_IN_TOUCH_GAMEPAD_OPTIONS: Record<string, string> = {
+  'virtual-gamepad': 'disabled',
+  'virtual-gamepad-left-handed-mode': 'disabled',
+  'menu-bar-button': 'hidden',
+};
 
 export type EmulatorBootMode = 'auto' | 'local' | 'cdn';
 export type EmulatorDataSource = 'local' | 'cdn';
@@ -53,6 +58,39 @@ function clearEmulatorGlobals(): void {
   delete window.EJS_onGameStart;
 }
 
+function hideBuiltInTouchControls(): void {
+  const emulator = window.EJS_emulator as
+    | (typeof window.EJS_emulator & {
+        changeSettingOption?: (option: string, value: string, skipSave?: boolean) => void;
+        toggleVirtualGamepad?: (show: boolean) => void;
+        elements?: {
+          menuToggle?: HTMLElement | null;
+        };
+      })
+    | undefined;
+
+  try {
+    for (const [option, value] of Object.entries(BUILT_IN_TOUCH_GAMEPAD_OPTIONS)) {
+      emulator?.changeSettingOption?.(option, value, true);
+    }
+    emulator?.toggleVirtualGamepad?.(false);
+    if (emulator?.elements?.menuToggle instanceof HTMLElement) {
+      emulator.elements.menuToggle.style.display = 'none';
+      emulator.elements.menuToggle.style.opacity = '0';
+      emulator.elements.menuToggle.style.pointerEvents = 'none';
+    }
+  } catch {
+    // EmulatorJS can reject setting changes before full initialization.
+  }
+
+  const touchControlElements = document.querySelectorAll<HTMLElement>('.ejs_virtualGamepad_parent, .ejs_virtualGamepad_open');
+  touchControlElements.forEach((element) => {
+    element.style.display = 'none';
+    element.style.opacity = '0';
+    element.style.pointerEvents = 'none';
+  });
+}
+
 function injectLoaderScript(src: string): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     const script = document.createElement('script');
@@ -91,6 +129,7 @@ async function loadWithDataPath(options: {
   window.EJS_threads = false;
   window.EJS_defaultControls = options.defaultControls;
   window.EJS_defaultOptions = {
+    ...BUILT_IN_TOUCH_GAMEPAD_OPTIONS,
     retroarch_core: options.core,
   };
   window.EJS_gameID = options.gameId;
@@ -134,6 +173,8 @@ async function loadWithDataPath(options: {
       didStart = true;
       window.clearInterval(failurePoll);
       window.clearTimeout(startTimeout);
+      hideBuiltInTouchControls();
+      window.setTimeout(() => hideBuiltInTouchControls(), 180);
       options.onStart?.();
       resolve();
     };

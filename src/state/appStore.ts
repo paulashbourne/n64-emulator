@@ -52,6 +52,15 @@ function axis(index: number, direction: 'negative' | 'positive', threshold = 0.3
   };
 }
 
+function axisDiscrete(index: number, axisValue: number, axisTolerance = 0.12): InputBinding {
+  return {
+    source: 'gamepad_axis',
+    index,
+    axisValue,
+    axisTolerance,
+  };
+}
+
 function createGamepadPresetBindings(layout: FaceLayout): Partial<Record<N64ControlTarget, InputBinding>> {
   const aFaceIndex = layout === 'nintendo' ? 1 : 0;
   const bFaceIndex = layout === 'nintendo' ? 0 : 1;
@@ -76,6 +85,46 @@ function createGamepadPresetBindings(layout: FaceLayout): Partial<Record<N64Cont
     analog_up: axis(1, 'negative', 0.2),
     analog_down: axis(1, 'positive', 0.2),
   };
+}
+
+function create8BitDo64PresetBindings(): Partial<Record<N64ControlTarget, InputBinding>> {
+  return {
+    a: button(0),
+    b: button(1),
+    z: button(8),
+    start: button(11),
+    l: button(6),
+    r: button(7),
+    // 8BitDo 64 exposes D-pad on a hat-style axis (axis 9) with discrete values.
+    dpad_up: axisDiscrete(9, -1),
+    dpad_down: axisDiscrete(9, 1 / 7),
+    dpad_left: axisDiscrete(9, 5 / 7),
+    dpad_right: axisDiscrete(9, -3 / 7),
+    c_up: axis(5, 'negative', 0.4),
+    c_down: axis(5, 'positive', 0.4),
+    c_left: axis(2, 'negative', 0.4),
+    c_right: axis(2, 'positive', 0.4),
+    analog_left: axis(0, 'negative', 0.2),
+    analog_right: axis(0, 'positive', 0.2),
+    analog_up: axis(1, 'negative', 0.2),
+    analog_down: axis(1, 'positive', 0.2),
+  };
+}
+
+function isLegacy8BitDoPreset(profile: ControllerProfile): boolean {
+  if (profile.profileId !== DEFAULT_8BITDO_PROFILE_ID) {
+    return false;
+  }
+
+  const startBinding = profile.bindings.start;
+  const dpadUpBinding = profile.bindings.dpad_up;
+
+  return (
+    startBinding?.source === 'gamepad_button'
+    && startBinding.index === 9
+    && dpadUpBinding?.source === 'gamepad_button'
+    && dpadUpBinding.index === 12
+  );
 }
 
 interface AppStoreState {
@@ -157,24 +206,37 @@ async function ensureDefaultGamepadProfiles(): Promise<void> {
       name: '8BitDo 64 Bluetooth Controller',
       deviceId: 'preset-8bitdo-64-controller',
       deadzone: 0.2,
-      bindings: createGamepadPresetBindings('nintendo'),
+      bindings: create8BitDo64PresetBindings(),
       updatedAt: now,
     },
   ];
 
-  const missingProfiles: ControllerProfile[] = [];
   const allProfiles = await db.profiles.toArray();
-  const existingIds = new Set(allProfiles.map((profile) => profile.profileId));
+  const existingById = new Map(allProfiles.map((profile) => [profile.profileId, profile]));
+  const missingProfiles: ControllerProfile[] = [];
+  const upgradedProfiles: ControllerProfile[] = [];
 
   for (const template of templates) {
-    if (existingIds.has(template.profileId)) {
+    const existing = existingById.get(template.profileId);
+    if (!existing) {
+      missingProfiles.push(template);
       continue;
     }
-    missingProfiles.push(template);
+
+    if (template.profileId === DEFAULT_8BITDO_PROFILE_ID && isLegacy8BitDoPreset(existing)) {
+      upgradedProfiles.push({
+        ...existing,
+        name: template.name,
+        deviceId: template.deviceId,
+        deadzone: template.deadzone,
+        bindings: template.bindings,
+        updatedAt: Math.max(now, existing.updatedAt + 1),
+      });
+    }
   }
 
-  if (missingProfiles.length > 0) {
-    await db.profiles.bulkPut(missingProfiles);
+  if (missingProfiles.length > 0 || upgradedProfiles.length > 0) {
+    await db.profiles.bulkPut([...missingProfiles, ...upgradedProfiles]);
   }
 }
 
