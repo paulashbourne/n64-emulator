@@ -69,7 +69,15 @@ async function fetchCoverFiles() {
   }
 
   return payload.tree
-    .filter((entry) => entry && entry.type === 'blob' && typeof entry.path === 'string')
+    // Skip git symlink blobs (mode 120000). jsDelivr returns the target path text for those
+    // entries instead of image bytes, which causes cover render fallback in the app.
+    .filter(
+      (entry) =>
+        entry &&
+        entry.type === 'blob' &&
+        entry.mode !== '120000' &&
+        typeof entry.path === 'string',
+    )
     .map((entry) => entry.path)
     .filter((path) => path.startsWith(BOXART_PREFIX) && path.endsWith('.png'))
     .map((path) => path.slice(BOXART_PREFIX.length));

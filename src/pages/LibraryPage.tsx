@@ -670,15 +670,6 @@ export function LibraryPage() {
     setInfoMessage(`Removed "${title}" from the catalog.`);
   };
 
-  const onCopyRomHash = async (title: string, hash: string): Promise<void> => {
-    try {
-      await navigator.clipboard.writeText(hash);
-      setInfoMessage(`Copied ROM hash for "${title}".`);
-    } catch {
-      setInfoMessage(`Could not copy ROM hash for "${title}".`);
-    }
-  };
-
   const buildPlayLinkWithSaveSlot = (romId: string, slotId?: string): string => {
     const base = buildSessionPlayUrl(romId, onlineSessionContext);
     if (!slotId) {
@@ -1095,9 +1086,6 @@ export function LibraryPage() {
                       disabled={loadingRoms}
                     >
                       {rom.favorite ? 'Unfavorite' : 'Favorite'}
-                    </button>
-                    <button type="button" onClick={() => void onCopyRomHash(rom.title, rom.hash)} disabled={loadingRoms}>
-                      Copy Hash
                     </button>
                     <button
                       type="button"
