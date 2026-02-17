@@ -1,6 +1,6 @@
 # Warpdeck 64 Agent Handoff
 
-Last updated: 2026-02-13
+Last updated: 2026-02-17
 
 This file is a high-context handoff for future agents working in `/Users/paul/git/paulashbourne/n64-emulator`.
 
@@ -332,3 +332,14 @@ At minimum, confirm:
 - pane `backend` process is running (`npm run dev:multiplayer`),
 - frontend responds on `http://127.0.0.1:5173`,
 - backend health responds on `http://127.0.0.1:8787/health`.
+
+## 16) Commit + Push Cadence (Required)
+
+When Codex is making code changes in this repo, it should commit and push in smaller, functional slices instead of batching too much work into one large unpushed diff.
+
+### Required behavior
+
+- Commit after each reasonable set of related functional changes (for example: one bug fix, one UI feature, one refactor + its tests).
+- If there are multiple independent change sets, split them into multiple commits with clear commit messages.
+- Push after those commits once local checks for that slice are done, rather than waiting until the end of a long session.
+- Avoid mixing unrelated work in the same commit when a clean split is practical.
