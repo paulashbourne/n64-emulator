@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type PointerEvent } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 
 import { ControllerWizard } from '../components/ControllerWizard';
@@ -108,6 +108,17 @@ function appendRemoteInputEvent(current: RemoteInputEvent[], nextEvent: RemoteIn
   }
 
   return [nextEvent, ...current].slice(0, REMOTE_LOG_LIMIT);
+}
+
+function clampVolume(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  return Math.max(0, Math.min(1, value));
+}
+
+function volumePercentLabel(value: number): string {
+  return `${Math.round(clampVolume(value) * 100)}%`;
 }
 
 interface GuestStreamTelemetry {
@@ -696,6 +707,7 @@ export function OnlineSessionPage() {
   const suppressQuickTapUntilRef = useRef<number>(0);
   const guestPeerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const guestPendingIceCandidatesRef = useRef<RTCIceCandidateInit[]>([]);
+  const guestChatAudioElementsRef = useRef<Map<string, HTMLAudioElement>>(new Map());
   const guestVoiceLocalStreamRef = useRef<MediaStream | null>(null);
   const guestVoiceLocalTrackRef = useRef<MediaStreamTrack | null>(null);
   const guestVoiceSenderRef = useRef<RTCRtpSender | null>(null);
@@ -768,7 +780,11 @@ export function OnlineSessionPage() {
   const [savingHostRomSelection, setSavingHostRomSelection] = useState(false);
   const [hostStreamStatus, setHostStreamStatus] = useState<HostStreamStatus>('idle');
   const hostStreamStatusRef = useRef<HostStreamStatus>('idle');
+  const guestGameVolumeBeforeMuteRef = useRef(1);
+  const guestChatVolumeBeforeMuteRef = useRef(1);
   const [lobbyAudioMuted, setLobbyAudioMuted] = useState(false);
+  const [guestGameAudioVolume, setGuestGameAudioVolume] = useState(1);
+  const [guestChatAudioVolume, setGuestChatAudioVolume] = useState(1);
   const [voiceInputMuted, setVoiceInputMuted] = useState(true);
   const [voiceMicRequesting, setVoiceMicRequesting] = useState(false);
   const [voiceMicError, setVoiceMicError] = useState<string>();
@@ -1837,10 +1853,51 @@ export function OnlineSessionPage() {
     }
   }, []);
 
+  const clearGuestChatAudioPlayback = useCallback((): void => {
+    for (const element of guestChatAudioElementsRef.current.values()) {
+      element.pause();
+      element.srcObject = null;
+    }
+    guestChatAudioElementsRef.current.clear();
+  }, []);
+
+  const applyGuestChatAudioVolume = useCallback((volume: number): void => {
+    const normalized = clampVolume(volume);
+    for (const element of guestChatAudioElementsRef.current.values()) {
+      element.volume = normalized;
+    }
+  }, []);
+
+  const attachGuestChatAudioTrack = useCallback((track: MediaStreamTrack): void => {
+    const stream = new MediaStream([track]);
+    let element = guestChatAudioElementsRef.current.get(track.id);
+    if (!element) {
+      element = document.createElement('audio');
+      element.autoplay = true;
+      guestChatAudioElementsRef.current.set(track.id, element);
+    }
+    element.srcObject = stream;
+    element.volume = clampVolume(guestChatAudioVolume);
+    void element.play().catch(() => {
+      // Autoplay can be blocked until the user interacts with the page.
+    });
+
+    track.onended = () => {
+      const existing = guestChatAudioElementsRef.current.get(track.id);
+      if (!existing) {
+        return;
+      }
+      existing.pause();
+      existing.srcObject = null;
+      guestChatAudioElementsRef.current.delete(track.id);
+    };
+  }, [guestChatAudioVolume]);
+
   const clearGuestPeerConnection = useCallback((): void => {
     clearGuestAutoResyncTimer();
     clearGuestHardResyncTimer();
     clearGuestBootstrapResyncTimer();
+    clearGuestChatAudioPlayback();
 
     const peer = guestPeerConnectionRef.current;
     if (peer) {
@@ -1875,6 +1932,7 @@ export function OnlineSessionPage() {
   }, [
     clearGuestAutoResyncTimer,
     clearGuestBootstrapResyncTimer,
+    clearGuestChatAudioPlayback,
     clearGuestHardResyncTimer,
     setGuestStreamTelemetryIfChanged,
   ]);
@@ -2076,8 +2134,9 @@ export function OnlineSessionPage() {
       });
     };
     connection.ontrack = (event) => {
-      const [stream] = event.streams;
-      if (!stream) {
+      const stream = event.streams[0] ?? new MediaStream([event.track]);
+      if (event.track.kind === 'audio' && stream.getVideoTracks().length === 0) {
+        attachGuestChatAudioTrack(event.track);
         return;
       }
 
@@ -2087,6 +2146,7 @@ export function OnlineSessionPage() {
         wireGuestVideoStatusHandlers(video);
         video.srcObject = stream;
         video.muted = lobbyAudioMuted;
+        video.volume = lobbyAudioMuted ? 0 : clampVolume(guestGameAudioVolume);
         void video.play().catch(() => {
           // Autoplay can be blocked on some browsers until interaction.
         });
@@ -2123,7 +2183,15 @@ export function OnlineSessionPage() {
 
     guestPeerConnectionRef.current = connection;
     return connection;
-  }, [lobbyAudioMuted, scheduleGuestAutoResync, session?.voiceEnabled, voiceInputMuted, wireGuestVideoStatusHandlers]);
+  }, [
+    attachGuestChatAudioTrack,
+    guestGameAudioVolume,
+    lobbyAudioMuted,
+    scheduleGuestAutoResync,
+    session?.voiceEnabled,
+    voiceInputMuted,
+    wireGuestVideoStatusHandlers,
+  ]);
 
   const flushPendingGuestIceCandidates = useCallback((connection: RTCPeerConnection): void => {
     if (guestPendingIceCandidatesRef.current.length === 0) {
@@ -2222,7 +2290,12 @@ export function OnlineSessionPage() {
       return;
     }
     video.muted = lobbyAudioMuted;
-  }, [lobbyAudioMuted]);
+    video.volume = lobbyAudioMuted ? 0 : clampVolume(guestGameAudioVolume);
+  }, [guestGameAudioVolume, lobbyAudioMuted]);
+
+  useEffect(() => {
+    applyGuestChatAudioVolume(guestChatAudioVolume);
+  }, [applyGuestChatAudioVolume, guestChatAudioVolume]);
 
   useEffect(() => {
     if (isHost || !session?.voiceEnabled) {
@@ -2286,8 +2359,9 @@ export function OnlineSessionPage() {
   useEffect(() => {
     return () => {
       stopGuestVoiceCapture();
+      clearGuestChatAudioPlayback();
     };
-  }, [stopGuestVoiceCapture]);
+  }, [clearGuestChatAudioPlayback, stopGuestVoiceCapture]);
 
   useEffect(() => {
     return () => {
@@ -4270,6 +4344,42 @@ export function OnlineSessionPage() {
     setClipboardFeedback(nextEnabled ? 'Lobby voice enabled.' : 'Lobby voice disabled.');
   };
 
+  const onGuestGameAudioVolumeChange = (event: ChangeEvent<HTMLInputElement>): void => {
+    const nextVolume = clampVolume(Number(event.target.value));
+    setGuestGameAudioVolume(nextVolume);
+  };
+
+  const onGuestChatAudioVolumeChange = (event: ChangeEvent<HTMLInputElement>): void => {
+    const nextVolume = clampVolume(Number(event.target.value));
+    setGuestChatAudioVolume(nextVolume);
+  };
+
+  const onToggleGuestGameAudioMuted = (): void => {
+    if (!lobbyAudioMuted) {
+      if (guestGameAudioVolume > 0.001) {
+        guestGameVolumeBeforeMuteRef.current = guestGameAudioVolume;
+      }
+      setLobbyAudioMuted(true);
+      return;
+    }
+
+    setLobbyAudioMuted(false);
+    if (guestGameAudioVolume <= 0.001) {
+      const restored = guestGameVolumeBeforeMuteRef.current;
+      setGuestGameAudioVolume(clampVolume(restored > 0.001 ? restored : 1));
+    }
+  };
+
+  const onToggleGuestChatAudioMuted = (): void => {
+    if (guestChatAudioVolume > 0.001) {
+      guestChatVolumeBeforeMuteRef.current = guestChatAudioVolume;
+      setGuestChatAudioVolume(0);
+      return;
+    }
+    const restored = guestChatVolumeBeforeMuteRef.current;
+    setGuestChatAudioVolume(clampVolume(restored > 0.001 ? restored : 1));
+  };
+
   const onToggleVoiceInputMuted = (): void => {
     if (isHost || !session?.voiceEnabled) {
       return;
@@ -5150,10 +5260,17 @@ export function OnlineSessionPage() {
                   )}
                   <button
                     type="button"
-                    onClick={() => setLobbyAudioMuted((value) => !value)}
+                    onClick={onToggleGuestGameAudioMuted}
                     disabled={hostStreamStatus !== 'live'}
                   >
-                    {lobbyAudioMuted ? 'Unmute Lobby Audio' : 'Mute Lobby Audio'}
+                    {lobbyAudioMuted ? 'Unmute Game Audio' : 'Mute Game Audio'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={onToggleGuestChatAudioMuted}
+                    disabled={hostStreamStatus !== 'live'}
+                  >
+                    {guestChatAudioVolume <= 0.001 ? 'Unmute Chat Audio' : 'Mute Chat Audio'}
                   </button>
                   <button type="button" onClick={onRequestHostStreamResync} disabled={!canSendRealtimeInput}>
                     Re-sync Stream
@@ -5231,6 +5348,32 @@ export function OnlineSessionPage() {
               </>
             ) : (
               <>
+                <div className="online-audio-mix-controls">
+                  <label htmlFor="guest-game-volume-slider">
+                    Game audio volume ({volumePercentLabel(guestGameAudioVolume)})
+                  </label>
+                  <input
+                    id="guest-game-volume-slider"
+                    type="range"
+                    min="0"
+                    max="1"
+                    step="0.01"
+                    value={guestGameAudioVolume}
+                    onChange={onGuestGameAudioVolumeChange}
+                  />
+                  <label htmlFor="guest-chat-volume-slider">
+                    Chat audio volume ({volumePercentLabel(guestChatAudioVolume)})
+                  </label>
+                  <input
+                    id="guest-chat-volume-slider"
+                    type="range"
+                    min="0"
+                    max="1"
+                    step="0.01"
+                    value={guestChatAudioVolume}
+                    onChange={onGuestChatAudioVolumeChange}
+                  />
+                </div>
                 {showGuestRescueCard ? (
                   <div className="stream-quality-request-card online-rescue-card">
                     <p>

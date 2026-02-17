@@ -70,6 +70,17 @@ const ONLINE_HOST_ADVANCED_TOOLS_PREFERENCES_KEY = 'play_online_host_advanced_to
 const PLAY_HUD_AUTO_HIDE_DELAY_MS = 3_200;
 const SAVE_AUTOSYNC_INTERVAL_MS = 20_000;
 const PLAY_COMPACT_HUD_MAX_WIDTH = 980;
+const ONLINE_AUDIO_DEFAULT_GAME_VOLUME = 0.5;
+const ONLINE_AUDIO_DEFAULT_CHAT_VOLUME = 1;
+const ONLINE_VOICE_MEDIA_CONSTRAINTS: MediaStreamConstraints = {
+  audio: {
+    echoCancellation: true,
+    noiseSuppression: true,
+    autoGainControl: true,
+    channelCount: 1,
+  },
+  video: false,
+};
 
 type SessionStatus = 'loading' | 'running' | 'paused' | 'error';
 type WizardMode = 'create' | 'edit';
@@ -318,6 +329,17 @@ function relayStatusClass(status: 'offline' | 'connecting' | 'connected'): strin
     return 'status-pill status-warn';
   }
   return 'status-pill status-bad';
+}
+
+function clampVolume(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  return Math.min(1, Math.max(0, value));
+}
+
+function volumePercentLabel(value: number): string {
+  return `${Math.round(clampVolume(value) * 100)}%`;
 }
 
 function normalizeOnlineSessionSnapshot(session: MultiplayerSessionSnapshot): MultiplayerSessionSnapshot {
@@ -600,6 +622,7 @@ export function PlayPage() {
   const lastAppliedProfileRef = useRef<string | null>(null);
   const playStageRef = useRef<HTMLElement | null>(null);
   const saveFileInputRef = useRef<HTMLInputElement | null>(null);
+  const quickProfileSwitchRef = useRef<HTMLDetailsElement | null>(null);
   const saveAutosyncTimerRef = useRef<number | null>(null);
   const onlineSocketRef = useRef<WebSocket | null>(null);
   const onlineReconnectTimerRef = useRef<number | null>(null);
@@ -609,7 +632,13 @@ export function PlayPage() {
   const hudAutoHideTimerRef = useRef<number | null>(null);
   const wizardAutoPausedRef = useRef(false);
   const onlineHostStreamRef = useRef<MediaStream | null>(null);
+  const onlineHostMicLocalStreamRef = useRef<MediaStream | null>(null);
+  const onlineHostMicLocalTrackRef = useRef<MediaStreamTrack | null>(null);
+  const onlineHostMicRelayStreamRef = useRef<MediaStream | null>(null);
   const onlineHostPeersRef = useRef<Map<string, HostStreamingPeerState>>(new Map());
+  const onlineHostRelayVoiceTracksRef = useRef<Map<string, MediaStreamTrack>>(new Map());
+  const onlineHostRelayVoiceStreamsRef = useRef<Map<string, MediaStream>>(new Map());
+  const onlineHostVoicePlaybackRef = useRef<Map<string, HTMLAudioElement>>(new Map());
   const onlineHostStatsBaselineRef = useRef<Map<string, { bytesSent: number; measuredAtMs: number }>>(new Map());
   const handleHostWebRtcSignalRef = useRef<((message: HostWebRtcSignalMessage) => void) | null>(null);
   const syncHostStreamingPeersRef = useRef<((session: MultiplayerSessionSnapshot) => void) | null>(null);
@@ -639,6 +668,8 @@ export function PlayPage() {
     streak: 0,
     lastAppliedAt: 0,
   });
+  const onlineHostGameVolumeBeforeMuteRef = useRef(ONLINE_AUDIO_DEFAULT_GAME_VOLUME);
+  const onlineHostChatVolumeBeforeMuteRef = useRef(ONLINE_AUDIO_DEFAULT_CHAT_VOLUME);
 
   const [rom, setRom] = useState<RomRecord>();
   const [status, setStatus] = useState<SessionStatus>('loading');
@@ -697,6 +728,12 @@ export function PlayPage() {
   );
   const [showOnlineHostAdvancedTools, setShowOnlineHostAdvancedTools] = useState(false);
   const [onlineHostStreamTelemetry, setOnlineHostStreamTelemetry] = useState<HostStreamTelemetry>({});
+  const [onlineHostGameVolume, setOnlineHostGameVolume] = useState(ONLINE_AUDIO_DEFAULT_GAME_VOLUME);
+  const [onlineHostChatVolume, setOnlineHostChatVolume] = useState(ONLINE_AUDIO_DEFAULT_CHAT_VOLUME);
+  const [onlineHostVoiceInputMuted, setOnlineHostVoiceInputMuted] = useState(true);
+  const [onlineHostVoiceMicRequesting, setOnlineHostVoiceMicRequesting] = useState(false);
+  const [onlineHostVoiceMicError, setOnlineHostVoiceMicError] = useState<string>();
+  const [onlineHostStreamHasGameAudio, setOnlineHostStreamHasGameAudio] = useState(false);
   const [onlineHostViewerTelemetry, setOnlineHostViewerTelemetry] = useState<
     Record<string, HostViewerStreamTelemetry>
   >({});
@@ -732,6 +769,7 @@ export function PlayPage() {
     [activeSaveSlotId, saveSlots],
   );
   const isOnlineHost = onlineRelayEnabled && onlineSessionSnapshot?.hostClientId === onlineClientId;
+  const onlineVoiceEnabled = Boolean(onlineSessionSnapshot?.voiceEnabled);
   const onlineGuestMembers = useMemo(
     () =>
       (onlineSessionSnapshot?.members ?? []).filter(
@@ -1038,9 +1076,138 @@ export function PlayPage() {
     setOnlineStreamPeers(onlineHostPeersRef.current.size);
   }, []);
 
+  const stopOnlineHostVoicePlaybackForClient = useCallback((clientId: string): void => {
+    const element = onlineHostVoicePlaybackRef.current.get(clientId);
+    if (!element) {
+      return;
+    }
+    element.pause();
+    element.srcObject = null;
+    onlineHostVoicePlaybackRef.current.delete(clientId);
+  }, []);
+
+  const clearOnlineHostVoicePlayback = useCallback((): void => {
+    for (const clientId of Array.from(onlineHostVoicePlaybackRef.current.keys())) {
+      stopOnlineHostVoicePlaybackForClient(clientId);
+    }
+  }, [stopOnlineHostVoicePlaybackForClient]);
+
+  const applyOnlineHostChatPlaybackVolume = useCallback((volume: number): void => {
+    const normalized = clampVolume(volume);
+    for (const element of onlineHostVoicePlaybackRef.current.values()) {
+      element.volume = normalized;
+    }
+  }, []);
+
+  const getOnlineHostRelayVoiceStream = useCallback((clientId: string, track: MediaStreamTrack): MediaStream => {
+    const existing = onlineHostRelayVoiceStreamsRef.current.get(clientId);
+    if (existing) {
+      const existingTrack = existing.getAudioTracks()[0];
+      if (!existingTrack || existingTrack.id !== track.id) {
+        for (const candidate of existing.getTracks()) {
+          existing.removeTrack(candidate);
+        }
+        existing.addTrack(track);
+      }
+      return existing;
+    }
+
+    const created = new MediaStream([track]);
+    onlineHostRelayVoiceStreamsRef.current.set(clientId, created);
+    return created;
+  }, []);
+
+  const getOnlineHostMicRelayStream = useCallback((track: MediaStreamTrack): MediaStream => {
+    const existing = onlineHostMicRelayStreamRef.current;
+    if (existing) {
+      const existingTrack = existing.getAudioTracks()[0];
+      if (!existingTrack || existingTrack.id !== track.id) {
+        for (const candidate of existing.getTracks()) {
+          existing.removeTrack(candidate);
+        }
+        existing.addTrack(track);
+      }
+      return existing;
+    }
+
+    const created = new MediaStream([track]);
+    onlineHostMicRelayStreamRef.current = created;
+    return created;
+  }, []);
+
+  const removeOnlineHostRelayVoiceTrack = useCallback((clientId: string): boolean => {
+    let removed = false;
+    if (onlineHostRelayVoiceTracksRef.current.delete(clientId)) {
+      removed = true;
+    }
+    if (onlineHostRelayVoiceStreamsRef.current.delete(clientId)) {
+      removed = true;
+    }
+    stopOnlineHostVoicePlaybackForClient(clientId);
+    return removed;
+  }, [stopOnlineHostVoicePlaybackForClient]);
+
+  const stopOnlineHostVoiceCapture = useCallback((): boolean => {
+    const stream = onlineHostMicLocalStreamRef.current;
+    const track = onlineHostMicLocalTrackRef.current;
+    const hadCapture = Boolean(stream || track);
+
+    if (stream) {
+      stream.getTracks().forEach((candidate) => candidate.stop());
+    } else if (track) {
+      track.stop();
+    }
+
+    onlineHostMicLocalStreamRef.current = null;
+    onlineHostMicLocalTrackRef.current = null;
+    onlineHostMicRelayStreamRef.current = null;
+    setOnlineHostVoiceMicRequesting(false);
+    return hadCapture;
+  }, []);
+
+  const ensureOnlineHostVoiceCapture = useCallback(async (): Promise<MediaStreamTrack | null> => {
+    const currentTrack = onlineHostMicLocalTrackRef.current;
+    if (currentTrack && currentTrack.readyState === 'live') {
+      return currentTrack;
+    }
+
+    if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
+      setOnlineHostVoiceMicError('Microphone capture is unavailable in this browser.');
+      return null;
+    }
+
+    setOnlineHostVoiceMicRequesting(true);
+    setOnlineHostVoiceMicError(undefined);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia(ONLINE_VOICE_MEDIA_CONSTRAINTS);
+      const track = stream.getAudioTracks()[0];
+      if (!track) {
+        stream.getTracks().forEach((candidate) => candidate.stop());
+        throw new Error('No microphone track was detected.');
+      }
+      const previousStream = onlineHostMicLocalStreamRef.current;
+      if (previousStream && previousStream !== stream) {
+        previousStream.getTracks().forEach((candidate) => candidate.stop());
+      }
+      onlineHostMicLocalStreamRef.current = stream;
+      onlineHostMicLocalTrackRef.current = track;
+      return track;
+    } catch (captureError) {
+      const message =
+        captureError instanceof Error && captureError.message.trim().length > 0
+          ? captureError.message
+          : 'Microphone permission was denied.';
+      setOnlineHostVoiceMicError(message);
+      return null;
+    } finally {
+      setOnlineHostVoiceMicRequesting(false);
+    }
+  }, []);
+
   const closeOnlineHostPeer = useCallback((clientId: string): void => {
     const peerState = onlineHostPeersRef.current.get(clientId);
     if (!peerState) {
+      removeOnlineHostRelayVoiceTrack(clientId);
       return;
     }
 
@@ -1055,6 +1222,7 @@ export function PlayPage() {
     peerState.connection.close();
     onlineHostPeersRef.current.delete(clientId);
     onlineHostStatsBaselineRef.current.delete(clientId);
+    removeOnlineHostRelayVoiceTrack(clientId);
     setOnlineHostViewerTelemetry((current) => {
       if (!(clientId in current)) {
         return current;
@@ -1064,26 +1232,31 @@ export function PlayPage() {
       return next;
     });
     setOnlineStreamPeerCountFromMap();
-  }, [setOnlineStreamPeerCountFromMap]);
+  }, [removeOnlineHostRelayVoiceTrack, setOnlineStreamPeerCountFromMap]);
 
   const clearOnlineHostPeers = useCallback((): void => {
     for (const clientId of Array.from(onlineHostPeersRef.current.keys())) {
       closeOnlineHostPeer(clientId);
     }
     onlineHostStatsBaselineRef.current.clear();
+    onlineHostRelayVoiceTracksRef.current.clear();
+    onlineHostRelayVoiceStreamsRef.current.clear();
+    clearOnlineHostVoicePlayback();
     setOnlineHostStreamTelemetry({});
     setOnlineHostViewerTelemetry({});
     setOnlineStreamPeerCountFromMap();
-  }, [closeOnlineHostPeer, setOnlineStreamPeerCountFromMap]);
+  }, [clearOnlineHostVoicePlayback, closeOnlineHostPeer, setOnlineStreamPeerCountFromMap]);
 
   const stopOnlineHostStream = useCallback((): void => {
     const stream = onlineHostStreamRef.current;
     if (!stream) {
+      setOnlineHostStreamHasGameAudio(false);
       return;
     }
 
     stream.getTracks().forEach((track) => track.stop());
     onlineHostStreamRef.current = null;
+    setOnlineHostStreamHasGameAudio(false);
   }, []);
 
   const applyHostStreamQualityToConnection = useCallback((connection: RTCPeerConnection): void => {
@@ -1173,6 +1346,46 @@ export function PlayPage() {
       });
     };
 
+    connection.ontrack = (event) => {
+      if (event.track.kind !== 'audio') {
+        return;
+      }
+
+      const incomingTrack = event.track;
+      if (incomingTrack.readyState !== 'live') {
+        return;
+      }
+
+      onlineHostRelayVoiceTracksRef.current.set(targetClientId, incomingTrack);
+      const playbackStream = new MediaStream([incomingTrack]);
+      let playbackElement = onlineHostVoicePlaybackRef.current.get(targetClientId);
+      if (!playbackElement) {
+        playbackElement = document.createElement('audio');
+        playbackElement.autoplay = true;
+        onlineHostVoicePlaybackRef.current.set(targetClientId, playbackElement);
+      }
+      playbackElement.srcObject = playbackStream;
+      playbackElement.volume = clampVolume(onlineHostChatVolume);
+      void playbackElement.play().catch(() => {
+        // Autoplay can be blocked until user interaction on some browsers.
+      });
+
+      incomingTrack.onended = () => {
+        const currentTrack = onlineHostRelayVoiceTracksRef.current.get(targetClientId);
+        if (!currentTrack || currentTrack.id !== incomingTrack.id) {
+          return;
+        }
+        const removed = removeOnlineHostRelayVoiceTrack(targetClientId);
+        if (removed && onlineSessionSnapshotRef.current) {
+          syncHostStreamingPeersRef.current?.(onlineSessionSnapshotRef.current);
+        }
+      };
+
+      if (onlineSessionSnapshotRef.current) {
+        syncHostStreamingPeersRef.current?.(onlineSessionSnapshotRef.current);
+      }
+    };
+
     connection.onconnectionstatechange = () => {
       if (connection.connectionState === 'failed' || connection.connectionState === 'closed') {
         closeOnlineHostPeer(targetClientId);
@@ -1204,15 +1417,61 @@ export function PlayPage() {
     };
 
     return connection;
-  }, [closeOnlineHostPeer, sendWebRtcSignal]);
+  }, [closeOnlineHostPeer, onlineHostChatVolume, removeOnlineHostRelayVoiceTrack, sendWebRtcSignal]);
 
-  const attachHostStreamToPeer = useCallback((connection: RTCPeerConnection): { hasVideoTrack: boolean; trackAdded: boolean } => {
-    const stream = onlineHostStreamRef.current;
-    if (!stream) {
-      return {
-        hasVideoTrack: false,
-        trackAdded: false,
-      };
+  const attachHostStreamToPeer = useCallback((
+    connection: RTCPeerConnection,
+    targetClientId: string,
+  ): { hasMediaTrack: boolean; trackAdded: boolean; trackRemoved: boolean } => {
+    const desiredTracks = new Map<string, { track: MediaStreamTrack; stream: MediaStream }>();
+
+    const hostStream = onlineHostStreamRef.current;
+    if (hostStream) {
+      for (const track of hostStream.getTracks()) {
+        if (track.readyState !== 'live') {
+          continue;
+        }
+        desiredTracks.set(track.id, {
+          track,
+          stream: hostStream,
+        });
+      }
+    }
+
+    if (onlineVoiceEnabled) {
+      const hostMicTrack = onlineHostMicLocalTrackRef.current;
+      if (hostMicTrack && hostMicTrack.readyState === 'live') {
+        desiredTracks.set(hostMicTrack.id, {
+          track: hostMicTrack,
+          stream: getOnlineHostMicRelayStream(hostMicTrack),
+        });
+      }
+    }
+
+    for (const [clientId, voiceTrack] of Array.from(onlineHostRelayVoiceTracksRef.current.entries())) {
+      if (clientId === targetClientId) {
+        continue;
+      }
+      if (voiceTrack.readyState !== 'live') {
+        removeOnlineHostRelayVoiceTrack(clientId);
+        continue;
+      }
+      desiredTracks.set(voiceTrack.id, {
+        track: voiceTrack,
+        stream: getOnlineHostRelayVoiceStream(clientId, voiceTrack),
+      });
+    }
+
+    let trackRemoved = false;
+    for (const sender of connection.getSenders()) {
+      const senderTrack = sender.track;
+      if (!senderTrack) {
+        continue;
+      }
+      if (!desiredTracks.has(senderTrack.id)) {
+        connection.removeTrack(sender);
+        trackRemoved = true;
+      }
     }
 
     const existingTrackIds = new Set(
@@ -1223,9 +1482,10 @@ export function PlayPage() {
     );
 
     let trackAdded = false;
-    for (const track of stream.getTracks()) {
+    for (const { track, stream } of desiredTracks.values()) {
       if (!existingTrackIds.has(track.id)) {
         connection.addTrack(track, stream);
+        existingTrackIds.add(track.id);
         trackAdded = true;
       }
     }
@@ -1233,10 +1493,17 @@ export function PlayPage() {
     applyHostStreamQualityToConnection(connection);
 
     return {
-      hasVideoTrack: stream.getVideoTracks().length > 0,
+      hasMediaTrack: desiredTracks.size > 0,
       trackAdded,
+      trackRemoved,
     };
-  }, [applyHostStreamQualityToConnection]);
+  }, [
+    applyHostStreamQualityToConnection,
+    getOnlineHostMicRelayStream,
+    getOnlineHostRelayVoiceStream,
+    onlineVoiceEnabled,
+    removeOnlineHostRelayVoiceTrack,
+  ]);
 
   const syncHostStreamingPeers = useCallback((session: MultiplayerSessionSnapshot): void => {
     if (!isOnlineHostRef.current) {
@@ -1267,9 +1534,9 @@ export function PlayPage() {
         onlineHostPeersRef.current.set(member.clientId, peerState);
       }
 
-      const attachment = attachHostStreamToPeer(peerState.connection);
-      const shouldNegotiate = attachment.trackAdded || !peerState.negotiated;
-      if (attachment.hasVideoTrack && shouldNegotiate) {
+      const attachment = attachHostStreamToPeer(peerState.connection, member.clientId);
+      const shouldNegotiate = attachment.trackAdded || attachment.trackRemoved || !peerState.negotiated;
+      if (attachment.hasMediaTrack && shouldNegotiate) {
         ensureHostPeerNegotiation(member.clientId);
       }
     }
@@ -1315,7 +1582,7 @@ export function PlayPage() {
         disconnectTimer: null,
       };
       onlineHostPeersRef.current.set(senderClientId, peerState);
-      attachHostStreamToPeer(peerState.connection);
+      attachHostStreamToPeer(peerState.connection, senderClientId);
       setOnlineStreamPeerCountFromMap();
     }
 
@@ -1611,6 +1878,77 @@ export function PlayPage() {
     );
   }, [onlineLastQualityHint, setEmulatorWarning]);
 
+  const onHostGameVolumeChange = useCallback((event: ChangeEvent<HTMLInputElement>): void => {
+    const nextVolume = clampVolume(Number(event.target.value));
+    setOnlineHostGameVolume(nextVolume);
+  }, []);
+
+  const onHostChatVolumeChange = useCallback((event: ChangeEvent<HTMLInputElement>): void => {
+    const nextVolume = clampVolume(Number(event.target.value));
+    setOnlineHostChatVolume(nextVolume);
+  }, []);
+
+  const onToggleHostGameAudioMute = useCallback((): void => {
+    if (onlineHostGameVolume > 0.001) {
+      onlineHostGameVolumeBeforeMuteRef.current = onlineHostGameVolume;
+      setOnlineHostGameVolume(0);
+      return;
+    }
+    const restored = onlineHostGameVolumeBeforeMuteRef.current;
+    setOnlineHostGameVolume(clampVolume(restored > 0.001 ? restored : ONLINE_AUDIO_DEFAULT_GAME_VOLUME));
+  }, [onlineHostGameVolume]);
+
+  const onToggleHostChatAudioMute = useCallback((): void => {
+    if (onlineHostChatVolume > 0.001) {
+      onlineHostChatVolumeBeforeMuteRef.current = onlineHostChatVolume;
+      setOnlineHostChatVolume(0);
+      return;
+    }
+    const restored = onlineHostChatVolumeBeforeMuteRef.current;
+    setOnlineHostChatVolume(clampVolume(restored > 0.001 ? restored : ONLINE_AUDIO_DEFAULT_CHAT_VOLUME));
+  }, [onlineHostChatVolume]);
+
+  const onToggleHostVoiceInputMuted = useCallback((): void => {
+    if (!onlineRelayEnabled || !isOnlineHost) {
+      return;
+    }
+    if (!onlineVoiceEnabled) {
+      setEmulatorWarning('Enable voice chat in the room first.');
+      return;
+    }
+
+    if (!onlineHostVoiceInputMuted) {
+      setOnlineHostVoiceInputMuted(true);
+      const stoppedCapture = stopOnlineHostVoiceCapture();
+      if (stoppedCapture && onlineSessionSnapshotRef.current) {
+        syncHostStreamingPeers(onlineSessionSnapshotRef.current);
+      }
+      return;
+    }
+
+    void (async () => {
+      const track = await ensureOnlineHostVoiceCapture();
+      if (!track) {
+        setOnlineHostVoiceInputMuted(true);
+        return;
+      }
+      track.enabled = true;
+      setOnlineHostVoiceInputMuted(false);
+      if (onlineSessionSnapshotRef.current) {
+        syncHostStreamingPeers(onlineSessionSnapshotRef.current);
+      }
+    })();
+  }, [
+    ensureOnlineHostVoiceCapture,
+    isOnlineHost,
+    onlineHostVoiceInputMuted,
+    onlineRelayEnabled,
+    onlineVoiceEnabled,
+    setEmulatorWarning,
+    stopOnlineHostVoiceCapture,
+    syncHostStreamingPeers,
+  ]);
+
   const onToggleGuestInputMute = useCallback((clientId: string): void => {
     if (!onlineRelayEnabled || !isOnlineHost) {
       return;
@@ -1676,6 +2014,9 @@ export function PlayPage() {
 
     const existingStream = onlineHostStreamRef.current;
     if (existingStream?.getVideoTracks().some((track) => track.readyState === 'live')) {
+      setOnlineHostStreamHasGameAudio(
+        existingStream.getAudioTracks().some((track) => track.readyState === 'live'),
+      );
       return true;
     }
 
@@ -1684,7 +2025,19 @@ export function PlayPage() {
       return false;
     }
 
-    const capturedStream = playerCanvas.captureStream(ONLINE_STREAM_CAPTURE_FPS);
+    const emulator = window.EJS_emulator as
+      | (typeof window.EJS_emulator & {
+          collectScreenRecordingMediaTracks?: (canvas: HTMLCanvasElement, fps: number) => MediaStream | null;
+        })
+      | undefined;
+    let capturedStream: MediaStream;
+    try {
+      capturedStream =
+        emulator?.collectScreenRecordingMediaTracks?.(playerCanvas, ONLINE_STREAM_CAPTURE_FPS) ??
+        playerCanvas.captureStream(ONLINE_STREAM_CAPTURE_FPS);
+    } catch {
+      capturedStream = playerCanvas.captureStream(ONLINE_STREAM_CAPTURE_FPS);
+    }
     const videoTrack = capturedStream.getVideoTracks()[0];
     if (!videoTrack) {
       capturedStream.getTracks().forEach((track) => track.stop());
@@ -1693,6 +2046,9 @@ export function PlayPage() {
 
     stopOnlineHostStream();
     onlineHostStreamRef.current = capturedStream;
+    setOnlineHostStreamHasGameAudio(
+      capturedStream.getAudioTracks().some((track) => track.readyState === 'live'),
+    );
     if (onlineSessionSnapshotRef.current) {
       syncHostStreamingPeers(onlineSessionSnapshotRef.current);
     }
@@ -1702,6 +2058,51 @@ export function PlayPage() {
   useEffect(() => {
     setEmulatorWarning(undefined);
   }, [decodedRomId, setEmulatorWarning]);
+
+  useEffect(() => {
+    applyOnlineHostChatPlaybackVolume(onlineHostChatVolume);
+  }, [applyOnlineHostChatPlaybackVolume, onlineHostChatVolume]);
+
+  useEffect(() => {
+    const normalizedVolume = clampVolume(onlineHostGameVolume);
+    const hostWindow = window as Window & { EJS_volume?: number };
+    hostWindow.EJS_volume = normalizedVolume;
+
+    const emulator = window.EJS_emulator as
+      | (typeof window.EJS_emulator & {
+          setVolume?: (volume: number) => void;
+          volume?: number;
+        })
+      | undefined;
+    if (!emulator?.setVolume) {
+      return;
+    }
+
+    emulator.volume = normalizedVolume;
+    emulator.setVolume(normalizedVolume);
+  }, [onlineHostGameVolume, status]);
+
+  useEffect(() => {
+    if (onlineRelayEnabled && isOnlineHost && onlineVoiceEnabled) {
+      return;
+    }
+
+    const stoppedCapture = stopOnlineHostVoiceCapture();
+    if (!onlineHostVoiceInputMuted) {
+      setOnlineHostVoiceInputMuted(true);
+    }
+    setOnlineHostVoiceMicError(undefined);
+    if (stoppedCapture && onlineSessionSnapshotRef.current) {
+      syncHostStreamingPeers(onlineSessionSnapshotRef.current);
+    }
+  }, [
+    isOnlineHost,
+    onlineHostVoiceInputMuted,
+    onlineRelayEnabled,
+    onlineVoiceEnabled,
+    stopOnlineHostVoiceCapture,
+    syncHostStreamingPeers,
+  ]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1892,6 +2293,7 @@ export function PlayPage() {
       setOnlineSessionSnapshot(undefined);
       clearOnlineHostPeers();
       stopOnlineHostStream();
+      stopOnlineHostVoiceCapture();
       onlineSessionClosedRef.current = false;
       return;
     }
@@ -2154,6 +2556,7 @@ export function PlayPage() {
       clearHeartbeatTimer();
       clearOnlineHostPeers();
       stopOnlineHostStream();
+      stopOnlineHostVoiceCapture();
       const socket = onlineSocketRef.current;
       if (socket) {
         socket.close();
@@ -2165,6 +2568,7 @@ export function PlayPage() {
     onlineClientId,
     onlineCode,
     onlineRelayEnabled,
+    stopOnlineHostVoiceCapture,
     stopOnlineHostStream,
   ]);
 
@@ -2172,6 +2576,7 @@ export function PlayPage() {
     if (!onlineRelayEnabled || !isOnlineHost) {
       clearOnlineHostPeers();
       stopOnlineHostStream();
+      stopOnlineHostVoiceCapture();
       return;
     }
 
@@ -2206,6 +2611,7 @@ export function PlayPage() {
     onlineRelayEnabled,
     onlineSessionSnapshot,
     status,
+    stopOnlineHostVoiceCapture,
     stopOnlineHostStream,
     syncHostStreamingPeers,
     tryStartHostStreamCapture,
@@ -2730,6 +3136,23 @@ export function PlayPage() {
     setMenuOpen(true);
   };
 
+  const onActiveProfileSelect = useCallback(
+    (event: ChangeEvent<HTMLSelectElement>): void => {
+      setActiveProfile(event.target.value || undefined);
+    },
+    [setActiveProfile],
+  );
+
+  const onQuickSwapProfileSelect = useCallback(
+    (event: ChangeEvent<HTMLSelectElement>): void => {
+      onActiveProfileSelect(event);
+      if (quickProfileSwitchRef.current) {
+        quickProfileSwitchRef.current.open = false;
+      }
+    },
+    [onActiveProfileSelect],
+  );
+
   const onToggleFullscreen = async (): Promise<void> => {
     const stage = playStageRef.current;
     if (!stage) {
@@ -3104,6 +3527,27 @@ export function PlayPage() {
                   {isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}
                 </button>
               ) : null}
+              {onlineRelayEnabled && isOnlineHost ? (
+                <button type="button" className="play-action-secondary" onClick={onToggleHostChatAudioMute}>
+                  {onlineHostChatVolume <= 0.001 ? 'Unmute Chat' : 'Mute Chat'}
+                </button>
+              ) : null}
+              {onlineRelayEnabled && isOnlineHost ? (
+                <button
+                  type="button"
+                  className={onlineHostVoiceInputMuted ? 'play-action-secondary' : undefined}
+                  onClick={onToggleHostVoiceInputMuted}
+                  disabled={!onlineVoiceEnabled || onlineHostVoiceMicRequesting}
+                >
+                  {!onlineVoiceEnabled
+                    ? 'Voice Chat Off'
+                    : onlineHostVoiceMicRequesting
+                      ? 'Preparing Mic…'
+                      : onlineHostVoiceInputMuted
+                        ? 'Unmute Mic'
+                        : 'Mute Mic'}
+                </button>
+              ) : null}
               {showVirtualController && isGameInteractive && isCompactHudViewport ? (
                 <button type="button" className="play-action-secondary" onClick={() => setMenuOpen(true)}>
                   Pad Options
@@ -3182,14 +3626,18 @@ export function PlayPage() {
             <p>{shortcutHint}</p>
             {!onlineRelayEnabled ? (
               profiles.length > 0 ? (
-                <details className="play-profile-quick-switch">
-                  <summary>Applied controller profile: {activeProfileSummaryLabel}</summary>
+                <details ref={quickProfileSwitchRef} className="play-profile-quick-switch">
+                  <summary>
+                    <span className="play-profile-quick-switch-summary-label">Applied controller profile:</span>
+                    <span className="play-profile-quick-switch-summary-value">{activeProfileSummaryLabel}</span>
+                    <span className="play-profile-quick-switch-summary-hint">Quick swap</span>
+                  </summary>
                   <div className="play-profile-quick-switch-panel">
                     <label htmlFor="play-overlay-profile-switcher">Quick swap profile</label>
                     <select
                       id="play-overlay-profile-switcher"
                       value={activeProfileId ?? ''}
-                      onChange={(event) => setActiveProfile(event.target.value || undefined)}
+                      onChange={onQuickSwapProfileSelect}
                     >
                       <option value="">None</option>
                       {profiles.map((profile) => (
@@ -3401,6 +3849,67 @@ export function PlayPage() {
             {onlineLastRemoteInput ? <p className="online-subtle">Last remote input: {onlineLastRemoteInput}</p> : null}
             {isOnlineHost ? (
               <>
+                <div className="stream-quality-controls">
+                  <h4>Audio Mix</h4>
+                  <div className="online-audio-mix-controls">
+                    <label htmlFor="host-game-volume-slider">
+                      Game audio volume ({volumePercentLabel(onlineHostGameVolume)})
+                    </label>
+                    <input
+                      id="host-game-volume-slider"
+                      type="range"
+                      min="0"
+                      max="1"
+                      step="0.01"
+                      value={onlineHostGameVolume}
+                      onChange={onHostGameVolumeChange}
+                    />
+                    <label htmlFor="host-chat-volume-slider">
+                      Chat audio volume ({volumePercentLabel(onlineHostChatVolume)})
+                    </label>
+                    <input
+                      id="host-chat-volume-slider"
+                      type="range"
+                      min="0"
+                      max="1"
+                      step="0.01"
+                      value={onlineHostChatVolume}
+                      onChange={onHostChatVolumeChange}
+                    />
+                  </div>
+                  <div className="wizard-actions">
+                    <button type="button" onClick={onToggleHostGameAudioMute}>
+                      {onlineHostGameVolume <= 0.001 ? 'Unmute Game Audio' : 'Mute Game Audio'}
+                    </button>
+                    <button type="button" onClick={onToggleHostChatAudioMute}>
+                      {onlineHostChatVolume <= 0.001 ? 'Unmute Chat Audio' : 'Mute Chat Audio'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={onToggleHostVoiceInputMuted}
+                      disabled={!onlineVoiceEnabled || onlineHostVoiceMicRequesting}
+                    >
+                      {!onlineVoiceEnabled
+                        ? 'Voice Chat Off'
+                        : onlineHostVoiceMicRequesting
+                          ? 'Preparing Mic…'
+                          : onlineHostVoiceInputMuted
+                            ? 'Unmute Mic'
+                            : 'Mute Mic'}
+                    </button>
+                  </div>
+                  {!onlineVoiceEnabled ? (
+                    <p className="online-subtle">Lobby voice is disabled in room settings.</p>
+                  ) : (
+                    <p className="online-subtle">
+                      Voice chat is enabled. Unmute your mic to talk with connected guests.
+                    </p>
+                  )}
+                  <p className="online-subtle">
+                    Game volume controls emulator output (and game stream mix). Chat volume controls incoming guest voice playback.
+                  </p>
+                  {onlineHostVoiceMicError ? <p className="warning-text">{onlineHostVoiceMicError}</p> : null}
+                </div>
                 <div className="stream-quality-controls">
                   <h4>Input Moderation</h4>
                   {onlineGuestMembers.length > 0 ? (
@@ -3652,7 +4161,8 @@ export function PlayPage() {
                     </div>
                     <p className="online-subtle">{hostStreamHealthAssessment.detail}</p>
                     <p className="online-subtle">
-                      Host stream source: emulator canvas ({ONLINE_STREAM_CAPTURE_FPS} fps target, video-only stream path).
+                      Host stream source: emulator canvas ({ONLINE_STREAM_CAPTURE_FPS} fps target,{' '}
+                      {onlineHostStreamHasGameAudio ? 'game audio + video stream path' : 'video-first fallback path'}).
                     </p>
                   </>
                 ) : null}
@@ -3669,7 +4179,7 @@ export function PlayPage() {
           {profiles.length > 0 ? (
             <label>
               Active profile
-              <select value={activeProfileId ?? ''} onChange={(event) => setActiveProfile(event.target.value || undefined)}>
+              <select value={activeProfileId ?? ''} onChange={onActiveProfileSelect}>
                 <option value="">None</option>
                 {profiles.map((profile) => (
                   <option key={profile.profileId} value={profile.profileId}>

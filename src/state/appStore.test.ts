@@ -161,4 +161,87 @@ describe('app store profile defaults', () => {
     expect(stored).toBeDefined();
     expect(stored?.romHash).toBeUndefined();
   });
+
+  test('clock-skewed remote profiles are rebased so edited mappings are not overwritten', async () => {
+    const remoteProfiles = [
+      {
+        profileId: 'profile:clock-skew',
+        name: 'Clock Skew',
+        deviceId: 'test-device',
+        deadzone: 0.2,
+        bindings: {
+          a: { source: 'gamepad_button', index: 0 },
+        },
+        updatedAt: 10_000,
+      },
+    ];
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const method = init?.method ?? 'GET';
+
+        if (method === 'PUT') {
+          const rawBody = typeof init?.body === 'string' ? init.body : '{}';
+          const parsed = JSON.parse(rawBody) as {
+            profiles?: Array<{
+              profileId?: string;
+              updatedAt?: number;
+              bindings?: {
+                a?: {
+                  source?: string;
+                  index?: number;
+                };
+              };
+            }>;
+          };
+
+          const incomingProfiles = Array.isArray(parsed.profiles) ? parsed.profiles : [];
+          for (const incoming of incomingProfiles) {
+            if (!incoming?.profileId) {
+              continue;
+            }
+            const existingIndex = remoteProfiles.findIndex((entry) => entry.profileId === incoming.profileId);
+            if (existingIndex === -1) {
+              remoteProfiles.push(incoming as (typeof remoteProfiles)[number]);
+              continue;
+            }
+            if (typeof incoming.updatedAt === 'number' && incoming.updatedAt >= remoteProfiles[existingIndex].updatedAt) {
+              remoteProfiles[existingIndex] = incoming as (typeof remoteProfiles)[number];
+            }
+          }
+        }
+
+        return new Response(JSON.stringify({ profiles: remoteProfiles }), {
+          status: 200,
+          headers: {
+            'Content-Type': 'application/json',
+          },
+        });
+      }),
+    );
+
+    await db.profiles.put({
+      profileId: 'profile:clock-skew',
+      name: 'Clock Skew',
+      deviceId: 'test-device',
+      deadzone: 0.2,
+      bindings: {
+        a: { source: 'gamepad_button', index: 1 },
+      },
+      updatedAt: 100,
+    });
+
+    await useAppStore.getState().loadProfiles();
+
+    const local = await db.profiles.get('profile:clock-skew');
+    expect(local?.bindings.a?.source).toBe('gamepad_button');
+    expect(local?.bindings.a?.index).toBe(1);
+    expect(local?.updatedAt).toBeGreaterThan(10_000);
+
+    const remote = remoteProfiles.find((profile) => profile.profileId === 'profile:clock-skew');
+    expect(remote?.bindings.a?.source).toBe('gamepad_button');
+    expect(remote?.bindings.a?.index).toBe(1);
+    expect(remote?.updatedAt).toBeGreaterThan(10_000);
+  });
 });

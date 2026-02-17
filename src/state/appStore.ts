@@ -247,6 +247,69 @@ function normalizeGlobalProfile(profile: ControllerProfile): ControllerProfile {
   };
 }
 
+function normalizeBindingForComparison(binding: InputBinding): Record<string, string | number> {
+  const normalized: Record<string, string | number> = {
+    source: binding.source,
+  };
+
+  if (typeof binding.code === 'string') {
+    normalized.code = binding.code;
+  }
+  if (typeof binding.index === 'number') {
+    normalized.index = binding.index;
+  }
+  if (typeof binding.gamepadIndex === 'number') {
+    normalized.gamepadIndex = binding.gamepadIndex;
+  }
+  if (typeof binding.deviceId === 'string') {
+    normalized.deviceId = binding.deviceId;
+  }
+  if (binding.direction === 'negative' || binding.direction === 'positive') {
+    normalized.direction = binding.direction;
+  }
+  if (typeof binding.threshold === 'number') {
+    normalized.threshold = binding.threshold;
+  }
+  if (typeof binding.axisValue === 'number') {
+    normalized.axisValue = binding.axisValue;
+  }
+  if (typeof binding.axisTolerance === 'number') {
+    normalized.axisTolerance = binding.axisTolerance;
+  }
+
+  return normalized;
+}
+
+function profileMappingSignature(profile: ControllerProfile): string {
+  const normalizedBindings: Array<[string, Record<string, string | number>]> = [];
+  for (const [target, binding] of Object.entries(profile.bindings)) {
+    if (!binding) {
+      continue;
+    }
+    normalizedBindings.push([target, normalizeBindingForComparison(binding)]);
+  }
+  normalizedBindings.sort((left, right) => left[0].localeCompare(right[0]));
+
+  return JSON.stringify({
+    name: profile.name,
+    deviceId: profile.deviceId,
+    deadzone: profile.deadzone,
+    bindings: normalizedBindings,
+  });
+}
+
+function profilesHaveSameMappings(left: ControllerProfile, right: ControllerProfile): boolean {
+  return profileMappingSignature(left) === profileMappingSignature(right);
+}
+
+function resolveActiveProfileId(profiles: ControllerProfile[], preferredProfileId?: string): string | undefined {
+  if (preferredProfileId && profiles.some((profile) => profile.profileId === preferredProfileId)) {
+    return preferredProfileId;
+  }
+
+  return profiles.find((profile) => profile.profileId === DEFAULT_KEYBOARD_PROFILE_ID)?.profileId ?? profiles[0]?.profileId;
+}
+
 async function migrateScopedProfilesToGlobal(): Promise<void> {
   const allProfiles = await db.profiles.toArray();
   const scopedProfiles = allProfiles.filter((profile) => profile.romHash !== undefined);
@@ -289,6 +352,16 @@ async function synchronizeGlobalProfilesFromServer(): Promise<void> {
     const remoteProfile = remoteById.get(localProfile.profileId);
     if (!remoteProfile || localProfile.updatedAt > remoteProfile.updatedAt) {
       profilesToUpload.push(localProfile);
+      continue;
+    }
+
+    if (!profilesHaveSameMappings(localProfile, remoteProfile)) {
+      const rebasedLocalProfile: ControllerProfile = {
+        ...localProfile,
+        updatedAt: remoteProfile.updatedAt + 1,
+      };
+      profilesToUpload.push(rebasedLocalProfile);
+      localById.set(rebasedLocalProfile.profileId, rebasedLocalProfile);
     }
   }
 
@@ -492,28 +565,36 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
     }
     const profiles = await queryProfiles(romHash);
     const activeProfileId = get().activeProfileId;
-    const keyboardProfileId = profiles.find((profile) => profile.profileId === DEFAULT_KEYBOARD_PROFILE_ID)?.profileId;
 
     set({
       profiles,
-      activeProfileId:
-        activeProfileId && profiles.some((profile) => profile.profileId === activeProfileId)
-          ? activeProfileId
-          : keyboardProfileId ?? profiles[0]?.profileId,
+      activeProfileId: resolveActiveProfileId(profiles, activeProfileId),
     });
   },
 
   saveProfile: async (profile: ControllerProfile) => {
     const normalizedProfile = normalizeGlobalProfile(profile);
     await db.profiles.put(normalizedProfile);
-    try {
-      await upsertSharedControllerProfiles([normalizedProfile]);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown profile sync error.';
-      console.warn(`Unable to persist profile to shared store: ${message}`);
-    }
-    await get().loadProfiles();
-    set({ activeProfileId: normalizedProfile.profileId });
+
+    const localProfiles = await queryProfiles();
+    set({
+      profiles: localProfiles,
+      activeProfileId: resolveActiveProfileId(localProfiles, normalizedProfile.profileId),
+    });
+
+    void (async () => {
+      try {
+        await synchronizeGlobalProfilesFromServer();
+        const syncedProfiles = await queryProfiles();
+        set((state) => ({
+          profiles: syncedProfiles,
+          activeProfileId: resolveActiveProfileId(syncedProfiles, state.activeProfileId ?? normalizedProfile.profileId),
+        }));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Unknown profile sync error.';
+        console.warn(`Unable to persist profile to shared store: ${message}`);
+      }
+    })();
   },
 
   removeProfile: async (profileId: string) => {

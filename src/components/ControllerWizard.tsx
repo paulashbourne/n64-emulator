@@ -402,21 +402,26 @@ export function ControllerWizard({
         <div className="wizard-summary">
           <h3>Mapped Controls</h3>
           <ul>
-            {summary.map((entry) => (
-              <li key={entry.target} className={singleRemapTarget === entry.target ? 'wizard-summary-item-active' : undefined}>
-                <span>{entry.label}</span>
-                <span>{entry.bound ? bindingToLabel(wizardState.bindings[entry.target]!) : 'Not mapped'}</span>
-                {effectiveSaveMode === 'edit' ? (
-                  <button
-                    type="button"
-                    onClick={() => onRemapSingleControl(entry.target)}
-                    disabled={isSaving || isCapturing}
-                  >
-                    {singleRemapTarget === entry.target ? (isCapturing ? 'Listening…' : 'Remap Selected') : 'Remap Only'}
-                  </button>
-                ) : null}
-              </li>
-            ))}
+            {summary.map((entry) => {
+              const bindingLabel = entry.bound ? bindingToLabel(wizardState.bindings[entry.target]!) : 'Not mapped';
+              return (
+                <li key={entry.target} className={singleRemapTarget === entry.target ? 'wizard-summary-item-active' : undefined}>
+                  <span>{entry.label}</span>
+                  <span className="wizard-summary-binding" title={bindingLabel}>
+                    {bindingLabel}
+                  </span>
+                  {effectiveSaveMode === 'edit' ? (
+                    <button
+                      type="button"
+                      onClick={() => onRemapSingleControl(entry.target)}
+                      disabled={isSaving || isCapturing}
+                    >
+                      {singleRemapTarget === entry.target ? (isCapturing ? 'Listening…' : 'Remap Selected') : 'Remap Only'}
+                    </button>
+                  ) : null}
+                </li>
+              );
+            })}
           </ul>
         </div>
       </div>
@@ -434,7 +439,12 @@ export function ControllerWizard({
         </label>
 
         <label>
-          Analog Deadzone ({deadzone.toFixed(2)})
+          <span
+            className="wizard-help-label"
+            title="Analog deadzone ignores small stick drift near center. Raise it if your stick moves on its own; lower it for more sensitive movement."
+          >
+            Analog Deadzone ({deadzone.toFixed(2)})
+          </span>
           <input
             type="range"
             min={0}
