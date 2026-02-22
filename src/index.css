@@ -258,6 +258,18 @@ label {
   transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease, box-shadow 0.2s ease;
 }
 
+.app-header-nav .app-header-nav-button {
+  margin: 0;
+  min-width: auto;
+  padding: 0.44rem 0.92rem;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  font-weight: 700;
+  color: rgba(236, 242, 255, 0.9);
+  background: rgba(255, 255, 255, 0.03);
+  transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease, box-shadow 0.2s ease;
+}
+
 .app-header-nav a.active {
   border-color: rgba(138, 197, 255, 0.75);
   background: rgba(10, 132, 255, 0.2);
@@ -267,6 +279,11 @@ label {
 
 .app-header-nav a:hover {
   text-decoration: none;
+  border-color: rgba(138, 197, 255, 0.62);
+  background: rgba(10, 132, 255, 0.14);
+}
+
+.app-header-nav .app-header-nav-button:hover {
   border-color: rgba(138, 197, 255, 0.62);
   background: rgba(10, 132, 255, 0.14);
 }
@@ -1347,7 +1364,8 @@ label {
   gap: 0.44rem;
 }
 
-.play-primary-nav a {
+.play-primary-nav a,
+.play-primary-nav .app-header-nav-button {
   padding: 0.36rem 0.74rem;
   font-size: 0.8rem;
 }
@@ -1653,6 +1671,47 @@ label {
   place-items: center;
   padding: 1rem;
   z-index: 200;
+}
+
+.in-session-settings-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(11, 9, 21, 0.84);
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  z-index: 180;
+}
+
+.in-session-settings-panel {
+  width: min(96vw, 1160px);
+  max-height: 94vh;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+  padding: 0.9rem;
+}
+
+.in-session-settings-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0 0.1rem 0.6rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.in-session-settings-header h2 {
+  margin: 0;
+}
+
+.in-session-settings-header button {
+  min-width: auto;
+}
+
+.in-session-settings-body {
+  overflow: auto;
+  padding: 0.85rem 0.1rem 0.1rem;
 }
 
 .wizard-panel {
@@ -3639,7 +3698,8 @@ label {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
-  .play-primary-nav a {
+  .play-primary-nav a,
+  .play-primary-nav .app-header-nav-button {
     text-align: center;
   }
 
@@ -3916,7 +3976,8 @@ label {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
-  .app-header-nav a {
+  .app-header-nav a,
+  .app-header-nav .app-header-nav-button {
     padding: 0.35rem 0.68rem;
     font-size: 0.82rem;
     text-align: center;
