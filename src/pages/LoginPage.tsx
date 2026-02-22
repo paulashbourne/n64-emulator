@@ -1,15 +1,27 @@
 import { useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 
 import { useAuthStore } from '../state/authStore';
 
+function sanitizeRedirectPath(rawRedirect: string | null): string {
+  if (!rawRedirect) {
+    return '/online';
+  }
+  if (!rawRedirect.startsWith('/') || rawRedirect.startsWith('//')) {
+    return '/online';
+  }
+  return rawRedirect;
+}
+
 export function LoginPage() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const status = useAuthStore((state) => state.status);
   const loginWithPassword = useAuthStore((state) => state.loginWithPassword);
   const storeError = useAuthStore((state) => state.authError);
   const clearAuthError = useAuthStore((state) => state.clearAuthError);
+  const redirectPath = sanitizeRedirectPath(searchParams.get('redirect'));
 
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -18,9 +30,9 @@ export function LoginPage() {
 
   useEffect(() => {
     if (status === 'authenticated') {
-      navigate('/online');
+      navigate(redirectPath, { replace: true });
     }
-  }, [navigate, status]);
+  }, [navigate, redirectPath, status]);
 
   const onSubmit = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
@@ -32,7 +44,7 @@ export function LoginPage() {
         username,
         password,
       });
-      navigate('/online');
+      navigate(redirectPath, { replace: true });
     } catch (loginError) {
       const message = loginError instanceof Error ? loginError.message : 'Could not sign in.';
       setError(message);
@@ -72,7 +84,7 @@ export function LoginPage() {
           <button type="submit" className="preset-button" disabled={submitting}>
             {submitting ? 'Signing In…' : 'Log In'}
           </button>
-          <Link to="/signup">Need an account?</Link>
+          <Link to={`/signup?redirect=${encodeURIComponent(redirectPath)}`}>Need an account?</Link>
         </div>
       </form>
     </section>

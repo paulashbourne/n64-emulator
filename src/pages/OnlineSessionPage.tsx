@@ -5157,6 +5157,16 @@ export function OnlineSessionPage() {
               <button type="button" className="invite-code-pill" onClick={() => void onCopyInviteCode()}>
                 {normalizedCode}
               </button>
+              {isHost ? (
+                <button
+                  type="button"
+                  className="online-session-invite-link-inline"
+                  onClick={() => void onCopyInviteLink()}
+                  disabled={!inviteJoinUrl}
+                >
+                  Copy Invite Link
+                </button>
+              ) : null}
             </div>
           </>
         ) : null}

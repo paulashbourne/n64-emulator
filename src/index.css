@@ -2208,6 +2208,26 @@ label {
   font-size: 0.8rem;
 }
 
+.online-invite-entry-gate {
+  margin-top: 0.56rem;
+  padding: 0.62rem 0.68rem;
+  border-radius: 0.68rem;
+  border: 1px solid rgba(138, 197, 255, 0.38);
+  background: linear-gradient(165deg, rgba(120, 168, 255, 0.14), rgba(10, 132, 255, 0.08));
+}
+
+.online-invite-entry-gate p {
+  margin: 0;
+}
+
+.online-invite-entry-gate .online-inline-actions {
+  margin-top: 0.52rem;
+}
+
+.online-invite-entry-gate .online-subtle {
+  margin-top: 0.42rem;
+}
+
 .online-recent-panel {
   border-color: rgba(120, 168, 255, 0.28);
 }
@@ -2300,6 +2320,13 @@ label {
   background: linear-gradient(180deg, rgba(255, 159, 28, 0.26), rgba(255, 159, 28, 0.14));
   color: #ffe9c8;
   padding-inline: 0.82rem;
+}
+
+.online-session-invite-link-inline {
+  min-height: 2rem;
+  border-color: rgba(120, 168, 255, 0.58);
+  background: linear-gradient(180deg, rgba(120, 168, 255, 0.2), rgba(84, 120, 200, 0.12));
+  white-space: nowrap;
 }
 
 .online-session-header-actions {

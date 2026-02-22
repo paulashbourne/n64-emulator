@@ -28,6 +28,14 @@ function normalizePlayerName(name: string, fallback: string): string {
   return normalized.length > 0 ? normalized : fallback;
 }
 
+function normalizeRequiredPlayerName(name: string, emptyMessage: string): string {
+  const normalized = name.replace(/\s+/g, ' ').trim().slice(0, 32);
+  if (normalized.length === 0) {
+    throw new Error(emptyMessage);
+  }
+  return normalized;
+}
+
 function normalizeInviteCode(code: string): string {
   return code.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6);
 }
@@ -121,10 +129,18 @@ function OnlineAvatar({
   );
 }
 
+interface JoinSessionOptions {
+  codeOverride?: string;
+  nameOverride?: string;
+  requireExplicitName?: boolean;
+}
+
 export function OnlinePage() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const avatarFileInputRef = useRef<HTMLInputElement>(null);
+  const joinNameInputRef = useRef<HTMLInputElement>(null);
+  const inviteAutoJoinAttemptedRef = useRef(false);
 
   const roms = useAppStore((state) => state.roms);
   const refreshRoms = useAppStore((state) => state.refreshRoms);
@@ -143,9 +159,10 @@ export function OnlinePage() {
   const [identitySaving, setIdentitySaving] = useState(false);
   const [selectedRomId, setSelectedRomId] = useState<string>(NO_ROM_SELECTED);
   const [hostVoiceEnabled, setHostVoiceEnabled] = useState(true);
-  const initialInviteValue = searchParams.get('code') ?? '';
-  const initialInviteCode = extractInviteCodeInput(initialInviteValue);
-  const [joinCodeInput, setJoinCodeInput] = useState(initialInviteCode || initialInviteValue);
+  const inviteCodeQueryValue = searchParams.get('code') ?? '';
+  const inviteCodeFromLink = extractInviteCodeInput(inviteCodeQueryValue);
+  const initialInviteCode = inviteCodeFromLink;
+  const [joinCodeInput, setJoinCodeInput] = useState(initialInviteCode || inviteCodeQueryValue);
   const [error, setError] = useState<string>();
   const [creating, setCreating] = useState(false);
   const [joining, setJoining] = useState(false);
@@ -156,6 +173,7 @@ export function OnlinePage() {
   const [reopeningSessionKey, setReopeningSessionKey] = useState<string>();
   const [recentSearch, setRecentSearch] = useState('');
   const [recentRoleFilter, setRecentRoleFilter] = useState<'all' | 'host' | 'guest'>('all');
+  const [inviteGuestContinueSelected, setInviteGuestContinueSelected] = useState(false);
 
   const completeOnboardingStep = useCallback((step: 'import_rom' | 'launch_game' | 'verify_controls' | 'online_session'): void => {
     if (!UX_ONBOARDING_V2_ENABLED) {
@@ -264,11 +282,29 @@ export function OnlinePage() {
     };
   }, []);
 
+  useEffect(() => {
+    inviteAutoJoinAttemptedRef.current = false;
+    setInviteGuestContinueSelected(false);
+    if (inviteCodeFromLink.length === 6) {
+      setJoinCodeInput(inviteCodeFromLink);
+    }
+  }, [inviteCodeFromLink]);
+
   const selectedRom = useMemo(
     () => roms.find((rom) => rom.id === selectedRomId && selectedRomId !== NO_ROM_SELECTED),
     [roms, selectedRomId],
   );
   const normalizedJoinCode = useMemo(() => extractInviteCodeInput(joinCodeInput), [joinCodeInput]);
+  const inviteLinkDetected = inviteCodeFromLink.length === 6;
+  const showInviteAuthGate = inviteLinkDetected && authStatus === 'guest' && !inviteGuestContinueSelected;
+  const requireGuestInviteName = inviteLinkDetected && authStatus === 'guest' && inviteGuestContinueSelected;
+  const inviteLoginRedirectPath = inviteLinkDetected ? `/online?code=${encodeURIComponent(inviteCodeFromLink)}` : '/online';
+  const canSubmitJoin =
+    !joining
+    && !creating
+    && normalizedJoinCode.length === 6
+    && !showInviteAuthGate
+    && (!requireGuestInviteName || joinName.trim().length > 0);
   const joinCodeFeedback = useMemo(() => {
     if (joinCodeInput.trim().length === 0) {
       return {
@@ -436,12 +472,18 @@ export function OnlinePage() {
     }
   };
 
-  const onJoinSession = async (): Promise<void> => {
+  const onJoinSession = useCallback(async (options?: JoinSessionOptions): Promise<void> => {
     setError(undefined);
     setJoining(true);
     try {
-      const normalizedJoinName = normalizePlayerName(joinName, 'Player');
-      const normalizedCode = normalizedJoinCode;
+      const requireExplicitName = Boolean(options?.requireExplicitName);
+      const requestedName = options?.nameOverride ?? joinName;
+      const normalizedJoinName = requireExplicitName
+        ? normalizeRequiredPlayerName(requestedName, 'Enter a display name to continue as guest.')
+        : normalizePlayerName(requestedName, 'Player');
+      const normalizedCode = options?.codeOverride
+        ? extractInviteCodeInput(options.codeOverride)
+        : normalizedJoinCode;
       const avatarUrl = normalizeAvatarUrl(identityAvatarUrl);
       setJoinName(normalizedJoinName);
       setJoinCodeInput(normalizedCode);
@@ -475,6 +517,31 @@ export function OnlinePage() {
     } finally {
       setJoining(false);
     }
+  }, [completeOnboardingStep, identityAvatarUrl, joinName, navigate, normalizedJoinCode]);
+
+  useEffect(() => {
+    if (!inviteLinkDetected || authStatus !== 'authenticated') {
+      return;
+    }
+    if (creating || joining || inviteAutoJoinAttemptedRef.current) {
+      return;
+    }
+
+    inviteAutoJoinAttemptedRef.current = true;
+    void onJoinSession({
+      codeOverride: inviteCodeFromLink,
+      nameOverride: authUser?.username ?? joinName,
+    });
+  }, [authStatus, authUser?.username, creating, inviteCodeFromLink, inviteLinkDetected, joinName, joining, onJoinSession]);
+
+  const onContinueInviteAsGuest = (): void => {
+    setInviteGuestContinueSelected(true);
+    setError(undefined);
+    setJoinCodeInput(inviteCodeFromLink);
+    setJoinName('');
+    window.setTimeout(() => {
+      joinNameInputRef.current?.focus();
+    }, 50);
   };
 
   const onPasteInviteFromClipboard = async (): Promise<void> => {
@@ -1008,21 +1075,43 @@ export function OnlinePage() {
           <p className="online-card-kicker">Guest</p>
           <h2>Join Game</h2>
           <p>Enter your friend&apos;s invite code to join as the next available player slot.</p>
+          {showInviteAuthGate ? (
+            <div className="online-invite-entry-gate" role="region" aria-label="Invite access options">
+              <p>
+                You were invited to room <strong>{inviteCodeFromLink}</strong>. Log in for instant entry, or continue as
+                a guest.
+              </p>
+              <div className="wizard-actions online-inline-actions">
+                <Link to={`/login?redirect=${encodeURIComponent(inviteLoginRedirectPath)}`} className="preset-button">
+                  Log In to Join
+                </Link>
+                <button type="button" className="online-action-secondary" onClick={onContinueInviteAsGuest}>
+                  Continue as Guest
+                </button>
+              </div>
+              <p className="online-subtle">Guest mode requires a display name before joining.</p>
+            </div>
+          ) : null}
           <form
             className="online-session-form"
             onSubmit={(event) => {
               event.preventDefault();
-              void onJoinSession();
+              void onJoinSession({
+                requireExplicitName: requireGuestInviteName,
+              });
             }}
           >
             <div className="online-form-grid">
               <label>
                 Your Name
                 <input
+                  ref={joinNameInputRef}
                   type="text"
                   value={joinName}
                   onChange={(event) => setJoinName(event.target.value)}
                   maxLength={32}
+                  required={requireGuestInviteName}
+                  placeholder={requireGuestInviteName ? 'Enter your display name' : undefined}
                 />
               </label>
 
@@ -1054,12 +1143,15 @@ export function OnlinePage() {
             </div>
             <div className="online-join-hint">
               <span className={joinCodeFeedback.tone}>{joinCodeFeedback.text}</span>
+              {requireGuestInviteName && joinName.trim().length === 0 ? (
+                <span className="status-pill status-warn">Enter a display name to continue as guest.</span>
+              ) : null}
             </div>
             <div className="wizard-actions online-form-actions">
               <button
                 type="submit"
                 className="preset-button online-action-primary"
-                disabled={joining || creating || normalizedJoinCode.length !== 6}
+                disabled={!canSubmitJoin}
               >
                 {joining ? 'Joining…' : 'Join by Invite Code'}
               </button>
