@@ -1,7 +1,7 @@
-import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto';
+import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
-import { dirname } from 'node:path';
+import { basename, dirname, extname, join } from 'node:path';
 import { URL } from 'node:url';
 import { WebSocketServer } from 'ws';
 
@@ -17,6 +17,23 @@ const INVITE_CODE_LENGTH = 6;
 const INVITE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const CONTROLLER_PROFILE_STORE_PATH =
   process.env.MULTIPLAYER_PROFILE_STORE_PATH ?? './.runtime/controller-profiles.json';
+const AUTH_USER_STORE_PATH = process.env.AUTH_USER_STORE_PATH ?? './.runtime/users.json';
+const AUTH_SESSION_STORE_PATH = process.env.AUTH_SESSION_STORE_PATH ?? './.runtime/sessions.json';
+const CLOUD_SAVE_STORE_PATH = process.env.CLOUD_SAVE_STORE_PATH ?? './.runtime/cloud-saves.json';
+const AUTH_AVATAR_DIR = process.env.AUTH_AVATAR_DIR ?? './.runtime/avatars';
+const AUTH_SESSION_TTL_MS = Number(process.env.AUTH_SESSION_TTL_MS ?? 2_592_000_000);
+const AUTH_PASSWORD_MIN_LENGTH = Number(process.env.AUTH_PASSWORD_MIN_LENGTH ?? 8);
+const AUTH_SESSION_COOKIE = 'wd64_session';
+const AUTH_RATE_LIMIT_WINDOW_MS = 5 * 60_000;
+const AUTH_RATE_LIMIT_MAX_ATTEMPTS = 20;
+const MAX_AVATAR_BYTES = 256 * 1024;
+const ALLOWED_AVATAR_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
+const AVATAR_MIME_EXTENSION = {
+  'image/png': '.png',
+  'image/jpeg': '.jpg',
+  'image/webp': '.webp',
+  'image/gif': '.gif',
+};
 const CONTROLLER_PROFILE_TARGETS = [
   'a',
   'b',
@@ -39,6 +56,50 @@ const CONTROLLER_PROFILE_TARGETS = [
 ];
 const CONTROLLER_PROFILE_TARGET_SET = new Set(CONTROLLER_PROFILE_TARGETS);
 const INPUT_SOURCES = new Set(['keyboard', 'gamepad_button', 'gamepad_axis']);
+
+/**
+ * @typedef {{
+ *   userId: string;
+ *   username: string;
+ *   usernameLower: string;
+ *   email: string;
+ *   emailLower: string;
+ *   country: string;
+ *   avatarId?: string;
+ *   passwordSaltHex: string;
+ *   passwordHashHex: string;
+ *   passwordN: number;
+ *   passwordR: number;
+ *   passwordP: number;
+ *   createdAt: number;
+ *   updatedAt: number;
+ * }} AuthUserRecord
+ */
+
+/**
+ * @typedef {{
+ *   sessionId: string;
+ *   userId: string;
+ *   createdAt: number;
+ *   expiresAt: number;
+ *   lastSeenAt: number;
+ * }} AuthSessionRecord
+ */
+
+/**
+ * @typedef {{
+ *   key: string;
+ *   userId: string;
+ *   romHash: string;
+ *   slotId: string;
+ *   gameKey?: string;
+ *   gameTitle?: string;
+ *   slotName?: string;
+ *   updatedAt: number;
+ *   byteLength: number;
+ *   dataBase64: string;
+ * }} CloudSaveRecord
+ */
 
 /**
  * @typedef {{
@@ -107,19 +168,394 @@ const INPUT_SOURCES = new Set(['keyboard', 'gamepad_button', 'gamepad_axis']);
 const sessions = new Map();
 /** @type {Map<string, SharedControllerProfile>} */
 const sharedControllerProfiles = new Map();
+/** @type {Map<string, AuthUserRecord>} */
+const authUsersById = new Map();
+/** @type {Map<string, string>} */
+const authUserIdByUsernameLower = new Map();
+/** @type {Map<string, string>} */
+const authUserIdByEmailLower = new Map();
+/** @type {Map<string, AuthSessionRecord>} */
+const authSessions = new Map();
+/** @type {Map<string, CloudSaveRecord>} */
+const cloudSavesByKey = new Map();
+/** @type {Map<string, { windowStartedAt: number; attempts: number }>} */
+const authRateLimits = new Map();
 let profileStoreWritePromise = Promise.resolve();
+let authUserStoreWritePromise = Promise.resolve();
+let authSessionStoreWritePromise = Promise.resolve();
+let cloudSaveStoreWritePromise = Promise.resolve();
 
-function withCors(res) {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
+function resolveCorsOrigin(req) {
+  const origin = typeof req.headers.origin === 'string' ? req.headers.origin.trim() : '';
+  if (!origin) {
+    return '*';
+  }
+  return origin;
+}
+
+function withCors(req, res) {
+  const origin = resolveCorsOrigin(req);
+  res.setHeader('Vary', 'Origin');
+  res.setHeader('Access-Control-Allow-Origin', origin);
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 }
 
-function sendJson(res, statusCode, body) {
-  withCors(res);
+function sendJson(req, res, statusCode, body) {
+  withCors(req, res);
   res.statusCode = statusCode;
   res.setHeader('Content-Type', 'application/json');
   res.end(JSON.stringify(body));
+}
+
+function normalizeSessionTtlMs() {
+  const rounded = Math.round(AUTH_SESSION_TTL_MS);
+  if (!Number.isFinite(rounded)) {
+    return 2_592_000_000;
+  }
+  return Math.max(60_000, rounded);
+}
+
+function now() {
+  return Date.now();
+}
+
+function cleanAuthRateLimitCache() {
+  const current = now();
+  for (const [key, entry] of authRateLimits.entries()) {
+    if (current - entry.windowStartedAt > AUTH_RATE_LIMIT_WINDOW_MS) {
+      authRateLimits.delete(key);
+    }
+  }
+}
+
+function requestClientIp(req) {
+  const forwarded = typeof req.headers['x-forwarded-for'] === 'string' ? req.headers['x-forwarded-for'] : '';
+  if (forwarded) {
+    const first = forwarded.split(',')[0]?.trim();
+    if (first) {
+      return first.slice(0, 128);
+    }
+  }
+  return req.socket.remoteAddress ?? 'unknown';
+}
+
+function authRateLimitExceeded(req, action, usernameLower) {
+  cleanAuthRateLimitCache();
+  const key = `${action}:${requestClientIp(req)}:${usernameLower || '-'}`;
+  const current = now();
+  const existing = authRateLimits.get(key);
+  if (!existing || current - existing.windowStartedAt > AUTH_RATE_LIMIT_WINDOW_MS) {
+    authRateLimits.set(key, {
+      windowStartedAt: current,
+      attempts: 1,
+    });
+    return false;
+  }
+  existing.attempts += 1;
+  authRateLimits.set(key, existing);
+  return existing.attempts > AUTH_RATE_LIMIT_MAX_ATTEMPTS;
+}
+
+function parseCookies(req) {
+  const header = typeof req.headers.cookie === 'string' ? req.headers.cookie : '';
+  if (!header) {
+    return new Map();
+  }
+  const result = new Map();
+  for (const segment of header.split(';')) {
+    const trimmed = segment.trim();
+    if (!trimmed) {
+      continue;
+    }
+    const equalsIndex = trimmed.indexOf('=');
+    if (equalsIndex <= 0) {
+      continue;
+    }
+    const key = trimmed.slice(0, equalsIndex).trim();
+    const value = trimmed.slice(equalsIndex + 1).trim();
+    if (!key) {
+      continue;
+    }
+    try {
+      result.set(key, decodeURIComponent(value));
+    } catch {
+      result.set(key, value);
+    }
+  }
+  return result;
+}
+
+function shouldUseSecureCookie(req) {
+  if (req.socket.encrypted) {
+    return true;
+  }
+  const forwardedProto = typeof req.headers['x-forwarded-proto'] === 'string'
+    ? req.headers['x-forwarded-proto'].toLowerCase()
+    : '';
+  return forwardedProto.includes('https');
+}
+
+function appendSetCookieHeader(res, cookie) {
+  const existing = res.getHeader('Set-Cookie');
+  if (!existing) {
+    res.setHeader('Set-Cookie', cookie);
+    return;
+  }
+  if (Array.isArray(existing)) {
+    res.setHeader('Set-Cookie', [...existing, cookie]);
+    return;
+  }
+  res.setHeader('Set-Cookie', [String(existing), cookie]);
+}
+
+function setAuthCookie(req, res, sessionId, expiresAt) {
+  const ttlMs = Math.max(0, expiresAt - now());
+  const maxAge = Math.floor(ttlMs / 1000);
+  const secure = shouldUseSecureCookie(req) ? '; Secure' : '';
+  const value = encodeURIComponent(sessionId);
+  appendSetCookieHeader(
+    res,
+    `${AUTH_SESSION_COOKIE}=${value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${secure}`,
+  );
+}
+
+function clearAuthCookie(req, res) {
+  const secure = shouldUseSecureCookie(req) ? '; Secure' : '';
+  appendSetCookieHeader(
+    res,
+    `${AUTH_SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secure}`,
+  );
+}
+
+function normalizeUsername(value) {
+  if (typeof value !== 'string') {
+    return '';
+  }
+  return value
+    .trim()
+    .replace(/\s+/g, ' ')
+    .slice(0, 32);
+}
+
+function normalizeEmail(value) {
+  if (typeof value !== 'string') {
+    return '';
+  }
+  return value.trim().slice(0, 254);
+}
+
+function isValidEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
+function isValidUsername(username) {
+  return /^[A-Za-z0-9_-]{3,32}$/.test(username);
+}
+
+function normalizeCountry(country) {
+  if (typeof country !== 'string') {
+    return 'Unknown';
+  }
+  const normalized = country.trim().toUpperCase();
+  if (/^[A-Z]{2}$/.test(normalized)) {
+    return normalized;
+  }
+  return 'Unknown';
+}
+
+function inferCountryFromAcceptLanguage(headerValue) {
+  if (typeof headerValue !== 'string') {
+    return undefined;
+  }
+  const first = headerValue.split(',')[0]?.trim();
+  if (!first) {
+    return undefined;
+  }
+  const match = first.match(/[-_]([A-Za-z]{2}|\d{3})$/);
+  if (!match) {
+    return undefined;
+  }
+  return normalizeCountry(match[1]);
+}
+
+function detectCountry(req) {
+  const viewerCountry = normalizeCountry(String(req.headers['cloudfront-viewer-country'] ?? ''));
+  if (viewerCountry !== 'Unknown') {
+    return viewerCountry;
+  }
+  const cfIpCountry = normalizeCountry(String(req.headers['cf-ipcountry'] ?? ''));
+  if (cfIpCountry !== 'Unknown') {
+    return cfIpCountry;
+  }
+  const acceptLanguageCountry = inferCountryFromAcceptLanguage(req.headers['accept-language']);
+  if (acceptLanguageCountry && acceptLanguageCountry !== 'Unknown') {
+    return acceptLanguageCountry;
+  }
+  return 'Unknown';
+}
+
+function userForClient(user) {
+  return {
+    userId: user.userId,
+    username: user.username,
+    email: user.email,
+    country: user.country,
+    avatarUrl: user.avatarId ? `/api/avatars/${encodeURIComponent(user.avatarId)}` : null,
+  };
+}
+
+function hashPassword(password, saltHex, options = { N: 16384, r: 8, p: 1 }) {
+  const salt = Buffer.from(saltHex, 'hex');
+  const derived = scryptSync(password, salt, 64, options);
+  return {
+    passwordHashHex: derived.toString('hex'),
+    passwordN: options.N,
+    passwordR: options.r,
+    passwordP: options.p,
+  };
+}
+
+function verifyPassword(password, user) {
+  try {
+    const salt = Buffer.from(user.passwordSaltHex, 'hex');
+    const expected = Buffer.from(user.passwordHashHex, 'hex');
+    const derived = scryptSync(password, salt, expected.length, {
+      N: user.passwordN || 16384,
+      r: user.passwordR || 8,
+      p: user.passwordP || 1,
+    });
+    return timingSafeEqual(derived, expected);
+  } catch {
+    return false;
+  }
+}
+
+function sessionRecordValid(record) {
+  return (
+    record &&
+    typeof record === 'object' &&
+    typeof record.sessionId === 'string' &&
+    typeof record.userId === 'string' &&
+    typeof record.expiresAt === 'number' &&
+    record.expiresAt > now()
+  );
+}
+
+function getAuthSession(req) {
+  const sessionId = parseCookies(req).get(AUTH_SESSION_COOKIE);
+  if (!sessionId) {
+    return null;
+  }
+  const session = authSessions.get(sessionId);
+  if (!session || session.expiresAt <= now()) {
+    if (session) {
+      authSessions.delete(sessionId);
+      void queueAuthSessionPersist();
+    }
+    return null;
+  }
+  return session;
+}
+
+function getAuthenticatedUser(req) {
+  const session = getAuthSession(req);
+  if (!session) {
+    return null;
+  }
+  const user = authUsersById.get(session.userId);
+  if (!user) {
+    authSessions.delete(session.sessionId);
+    void queueAuthSessionPersist();
+    return null;
+  }
+  return {
+    user,
+    session,
+  };
+}
+
+function parseAvatarIdFromPath(pathname) {
+  const match = pathname.match(/^\/api\/avatars\/([A-Za-z0-9._-]+)$/);
+  if (!match) {
+    return null;
+  }
+  const avatarId = match[1];
+  if (!/^[A-Za-z0-9-]+\.(png|jpg|webp|gif)$/.test(avatarId)) {
+    return null;
+  }
+  return avatarId;
+}
+
+function avatarMimeTypeFromFileName(fileName) {
+  const extension = extname(fileName).toLowerCase();
+  if (extension === '.png') {
+    return 'image/png';
+  }
+  if (extension === '.jpg' || extension === '.jpeg') {
+    return 'image/jpeg';
+  }
+  if (extension === '.webp') {
+    return 'image/webp';
+  }
+  if (extension === '.gif') {
+    return 'image/gif';
+  }
+  return 'application/octet-stream';
+}
+
+async function removeAvatarFile(avatarId) {
+  if (!avatarId) {
+    return;
+  }
+  const safeName = basename(avatarId);
+  if (safeName !== avatarId) {
+    return;
+  }
+  try {
+    await unlink(join(AUTH_AVATAR_DIR, safeName));
+  } catch (error) {
+    if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') {
+      return;
+    }
+    console.warn(`Failed to remove avatar file ${safeName}:`, error);
+  }
+}
+
+function normalizeCloudSaveIdentity(romHash, slotId) {
+  const normalizedRomHash = typeof romHash === 'string' ? romHash.trim().toLowerCase().slice(0, 128) : '';
+  const normalizedSlotId = typeof slotId === 'string' ? slotId.trim().slice(0, 128) : '';
+  if (!normalizedRomHash || !normalizedSlotId) {
+    return null;
+  }
+  return {
+    romHash: normalizedRomHash,
+    slotId: normalizedSlotId,
+  };
+}
+
+function cloudSaveKey(userId, romHash, slotId) {
+  return `${userId}:${romHash}:${slotId}`;
+}
+
+function cloudSaveForClient(record, includeDataBase64 = false) {
+  const base = {
+    romHash: record.romHash,
+    slotId: record.slotId,
+    gameKey: record.gameKey,
+    gameTitle: record.gameTitle,
+    slotName: record.slotName,
+    updatedAt: record.updatedAt,
+    byteLength: record.byteLength,
+  };
+  if (includeDataBase64) {
+    return {
+      ...base,
+      dataBase64: record.dataBase64,
+    };
+  }
+  return base;
 }
 
 async function readJsonBody(req) {
@@ -297,6 +733,220 @@ async function loadSharedProfilesFromDisk() {
   }
 }
 
+async function persistUsersToDisk() {
+  const directory = dirname(AUTH_USER_STORE_PATH);
+  const payload = JSON.stringify(
+    {
+      updatedAt: now(),
+      users: [...authUsersById.values()],
+    },
+    null,
+    2,
+  );
+
+  await mkdir(directory, { recursive: true });
+  await writeFile(AUTH_USER_STORE_PATH, payload, 'utf8');
+}
+
+async function queueAuthUserPersist() {
+  authUserStoreWritePromise = authUserStoreWritePromise
+    .then(() => persistUsersToDisk())
+    .catch((error) => {
+      console.error(`Failed to persist auth users at ${AUTH_USER_STORE_PATH}:`, error);
+    });
+  await authUserStoreWritePromise;
+}
+
+function resetUserIndexes() {
+  authUserIdByUsernameLower.clear();
+  authUserIdByEmailLower.clear();
+  for (const user of authUsersById.values()) {
+    authUserIdByUsernameLower.set(user.usernameLower, user.userId);
+    authUserIdByEmailLower.set(user.emailLower, user.userId);
+  }
+}
+
+function sanitizeLoadedUserRecord(rawUser) {
+  if (!rawUser || typeof rawUser !== 'object') {
+    return null;
+  }
+
+  const userId = typeof rawUser.userId === 'string' ? rawUser.userId.trim() : '';
+  const username = normalizeUsername(rawUser.username);
+  const email = normalizeEmail(rawUser.email);
+  const country = normalizeCountry(rawUser.country);
+  const passwordSaltHex = typeof rawUser.passwordSaltHex === 'string' ? rawUser.passwordSaltHex.trim().toLowerCase() : '';
+  const passwordHashHex = typeof rawUser.passwordHashHex === 'string' ? rawUser.passwordHashHex.trim().toLowerCase() : '';
+  const createdAt = typeof rawUser.createdAt === 'number' ? Math.round(rawUser.createdAt) : now();
+  const updatedAt = typeof rawUser.updatedAt === 'number' ? Math.round(rawUser.updatedAt) : createdAt;
+  const avatarId = typeof rawUser.avatarId === 'string' ? basename(rawUser.avatarId.trim()) : undefined;
+  const passwordN = typeof rawUser.passwordN === 'number' ? Math.round(rawUser.passwordN) : 16384;
+  const passwordR = typeof rawUser.passwordR === 'number' ? Math.round(rawUser.passwordR) : 8;
+  const passwordP = typeof rawUser.passwordP === 'number' ? Math.round(rawUser.passwordP) : 1;
+  if (!userId || !isValidUsername(username) || !isValidEmail(email)) {
+    return null;
+  }
+  if (!/^[a-f0-9]+$/.test(passwordSaltHex) || !/^[a-f0-9]+$/.test(passwordHashHex)) {
+    return null;
+  }
+  return {
+    userId,
+    username,
+    usernameLower: username.toLowerCase(),
+    email,
+    emailLower: email.toLowerCase(),
+    country,
+    avatarId: avatarId && /^[A-Za-z0-9-]+\.(png|jpg|webp|gif)$/.test(avatarId) ? avatarId : undefined,
+    passwordSaltHex,
+    passwordHashHex,
+    passwordN,
+    passwordR,
+    passwordP,
+    createdAt,
+    updatedAt,
+  };
+}
+
+async function loadUsersFromDisk() {
+  try {
+    const raw = await readFile(AUTH_USER_STORE_PATH, 'utf8');
+    const parsed = JSON.parse(raw);
+    const users = Array.isArray(parsed?.users) ? parsed.users : [];
+    for (const rawUser of users) {
+      const sanitized = sanitizeLoadedUserRecord(rawUser);
+      if (!sanitized) {
+        continue;
+      }
+      authUsersById.set(sanitized.userId, sanitized);
+    }
+    resetUserIndexes();
+  } catch (error) {
+    if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') {
+      return;
+    }
+    console.error('Unable to load auth users:', error);
+  }
+}
+
+async function persistAuthSessionsToDisk() {
+  const directory = dirname(AUTH_SESSION_STORE_PATH);
+  const payload = JSON.stringify(
+    {
+      updatedAt: now(),
+      sessions: [...authSessions.values()],
+    },
+    null,
+    2,
+  );
+
+  await mkdir(directory, { recursive: true });
+  await writeFile(AUTH_SESSION_STORE_PATH, payload, 'utf8');
+}
+
+async function queueAuthSessionPersist() {
+  authSessionStoreWritePromise = authSessionStoreWritePromise
+    .then(() => persistAuthSessionsToDisk())
+    .catch((error) => {
+      console.error(`Failed to persist auth sessions at ${AUTH_SESSION_STORE_PATH}:`, error);
+    });
+  await authSessionStoreWritePromise;
+}
+
+async function loadAuthSessionsFromDisk() {
+  try {
+    const raw = await readFile(AUTH_SESSION_STORE_PATH, 'utf8');
+    const parsed = JSON.parse(raw);
+    const sessions = Array.isArray(parsed?.sessions) ? parsed.sessions : [];
+    for (const rawSession of sessions) {
+      if (!sessionRecordValid(rawSession)) {
+        continue;
+      }
+      authSessions.set(rawSession.sessionId, {
+        sessionId: rawSession.sessionId,
+        userId: rawSession.userId,
+        createdAt: Math.round(rawSession.createdAt ?? now()),
+        expiresAt: Math.round(rawSession.expiresAt),
+        lastSeenAt: Math.round(rawSession.lastSeenAt ?? now()),
+      });
+    }
+  } catch (error) {
+    if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') {
+      return;
+    }
+    console.error('Unable to load auth sessions:', error);
+  }
+}
+
+async function persistCloudSavesToDisk() {
+  const directory = dirname(CLOUD_SAVE_STORE_PATH);
+  const payload = JSON.stringify(
+    {
+      updatedAt: now(),
+      saves: [...cloudSavesByKey.values()],
+    },
+    null,
+    2,
+  );
+
+  await mkdir(directory, { recursive: true });
+  await writeFile(CLOUD_SAVE_STORE_PATH, payload, 'utf8');
+}
+
+async function queueCloudSavePersist() {
+  cloudSaveStoreWritePromise = cloudSaveStoreWritePromise
+    .then(() => persistCloudSavesToDisk())
+    .catch((error) => {
+      console.error(`Failed to persist cloud saves at ${CLOUD_SAVE_STORE_PATH}:`, error);
+    });
+  await cloudSaveStoreWritePromise;
+}
+
+function sanitizeLoadedCloudSave(rawSave) {
+  if (!rawSave || typeof rawSave !== 'object') {
+    return null;
+  }
+  const userId = typeof rawSave.userId === 'string' ? rawSave.userId.trim() : '';
+  const identity = normalizeCloudSaveIdentity(rawSave.romHash, rawSave.slotId);
+  const dataBase64 = typeof rawSave.dataBase64 === 'string' ? rawSave.dataBase64.trim() : '';
+  const updatedAt = typeof rawSave.updatedAt === 'number' ? Math.round(rawSave.updatedAt) : now();
+  if (!userId || !identity || !dataBase64) {
+    return null;
+  }
+  const byteLength = typeof rawSave.byteLength === 'number' ? Math.max(0, Math.round(rawSave.byteLength)) : 0;
+  return {
+    key: cloudSaveKey(userId, identity.romHash, identity.slotId),
+    userId,
+    romHash: identity.romHash,
+    slotId: identity.slotId,
+    gameKey: typeof rawSave.gameKey === 'string' ? rawSave.gameKey.slice(0, 200) : undefined,
+    gameTitle: typeof rawSave.gameTitle === 'string' ? rawSave.gameTitle.slice(0, 200) : undefined,
+    slotName: typeof rawSave.slotName === 'string' ? rawSave.slotName.slice(0, 100) : undefined,
+    updatedAt,
+    byteLength,
+    dataBase64,
+  };
+}
+
+async function loadCloudSavesFromDisk() {
+  try {
+    const raw = await readFile(CLOUD_SAVE_STORE_PATH, 'utf8');
+    const parsed = JSON.parse(raw);
+    const saves = Array.isArray(parsed?.saves) ? parsed.saves : [];
+    for (const rawSave of saves) {
+      const sanitized = sanitizeLoadedCloudSave(rawSave);
+      if (!sanitized) {
+        continue;
+      }
+      cloudSavesByKey.set(sanitized.key, sanitized);
+    }
+  } catch (error) {
+    if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') {
+      return;
+    }
+    console.error('Unable to load cloud saves:', error);
+  }
+}
+
 function parseControllerProfileId(pathname) {
   const match = pathname.match(/^\/api\/controller-profiles\/(.+)$/);
   if (!match) {
@@ -327,11 +977,90 @@ function sanitizeAvatarUrl(value) {
     return undefined;
   }
 
-  if (clean.startsWith('http://') || clean.startsWith('https://') || clean.startsWith('data:image/')) {
+  if (
+    clean.startsWith('http://')
+    || clean.startsWith('https://')
+    || clean.startsWith('data:image/')
+    || clean.startsWith('/api/avatars/')
+  ) {
     return clean;
   }
 
   return undefined;
+}
+
+function sanitizePassword(value) {
+  if (typeof value !== 'string') {
+    return '';
+  }
+  return value.trim();
+}
+
+function parseCloudSavePathIdentity(pathname) {
+  const match = pathname.match(/^\/api\/cloud-saves\/([^/]+)\/([^/]+)$/);
+  if (!match) {
+    return null;
+  }
+  try {
+    const romHash = decodeURIComponent(match[1]);
+    const slotId = decodeURIComponent(match[2]);
+    return normalizeCloudSaveIdentity(romHash, slotId);
+  } catch {
+    return null;
+  }
+}
+
+function createAuthSession(userId) {
+  const createdAt = now();
+  const session = {
+    sessionId: randomUUID(),
+    userId,
+    createdAt,
+    expiresAt: createdAt + normalizeSessionTtlMs(),
+    lastSeenAt: createdAt,
+  };
+  authSessions.set(session.sessionId, session);
+  return session;
+}
+
+function refreshAuthSession(session) {
+  const refreshed = {
+    ...session,
+    lastSeenAt: now(),
+    expiresAt: now() + normalizeSessionTtlMs(),
+  };
+  authSessions.set(refreshed.sessionId, refreshed);
+  return refreshed;
+}
+
+function normalizeCloudSaveInput(rawSave) {
+  if (!rawSave || typeof rawSave !== 'object') {
+    return null;
+  }
+  const identity = normalizeCloudSaveIdentity(rawSave.romHash, rawSave.slotId);
+  const updatedAt = typeof rawSave.updatedAt === 'number' && Number.isFinite(rawSave.updatedAt)
+    ? Math.round(rawSave.updatedAt)
+    : now();
+  const dataBase64 = typeof rawSave.dataBase64 === 'string' ? rawSave.dataBase64.trim() : '';
+  if (!identity || !dataBase64) {
+    return null;
+  }
+  let byteLength = 0;
+  try {
+    byteLength = Buffer.from(dataBase64, 'base64').byteLength;
+  } catch {
+    return null;
+  }
+  return {
+    romHash: identity.romHash,
+    slotId: identity.slotId,
+    gameKey: typeof rawSave.gameKey === 'string' ? rawSave.gameKey.trim().slice(0, 200) || undefined : undefined,
+    gameTitle: typeof rawSave.gameTitle === 'string' ? rawSave.gameTitle.trim().slice(0, 200) || undefined : undefined,
+    slotName: typeof rawSave.slotName === 'string' ? rawSave.slotName.trim().slice(0, 100) || undefined : undefined,
+    updatedAt,
+    dataBase64,
+    byteLength,
+  };
 }
 
 function sanitizeChatMessage(value) {
@@ -935,19 +1664,404 @@ const httpServer = createServer(async (req, res) => {
   const pathname = requestUrl.pathname;
 
   if (req.method === 'OPTIONS') {
-    withCors(res);
+    withCors(req, res);
     res.statusCode = 204;
     res.end();
     return;
   }
 
   if (req.method === 'GET' && pathname === '/health') {
-    sendJson(res, 200, { ok: true, service: 'multiplayer-coordinator' });
+    sendJson(req, res, 200, { ok: true, service: 'multiplayer-coordinator' });
+    return;
+  }
+
+  if (req.method === 'GET' && pathname.startsWith('/api/avatars/')) {
+    const avatarId = parseAvatarIdFromPath(pathname);
+    if (!avatarId) {
+      sendJson(req, res, 404, { error: 'Avatar not found.' });
+      return;
+    }
+
+    const avatarPath = join(AUTH_AVATAR_DIR, basename(avatarId));
+    try {
+      const bytes = await readFile(avatarPath);
+      withCors(req, res);
+      res.statusCode = 200;
+      res.setHeader('Cache-Control', 'public, max-age=3600');
+      res.setHeader('Content-Type', avatarMimeTypeFromFileName(avatarId));
+      res.end(bytes);
+    } catch (error) {
+      if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') {
+        sendJson(req, res, 404, { error: 'Avatar not found.' });
+        return;
+      }
+      console.error(`Unable to load avatar ${avatarId}:`, error);
+      sendJson(req, res, 500, { error: 'Unable to load avatar.' });
+    }
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/api/auth/signup') {
+    try {
+      const body = await readJsonBody(req);
+      const email = normalizeEmail(body.email);
+      const username = normalizeUsername(body.username);
+      const usernameLower = username.toLowerCase();
+      const password = sanitizePassword(body.password);
+
+      if (authRateLimitExceeded(req, 'signup', usernameLower)) {
+        sendJson(req, res, 429, { error: 'Too many signup attempts. Please wait and try again.' });
+        return;
+      }
+
+      if (!isValidEmail(email)) {
+        sendJson(req, res, 400, { error: 'Email is invalid.' });
+        return;
+      }
+      if (!isValidUsername(username)) {
+        sendJson(req, res, 400, { error: 'Username must be 3-32 characters (letters, numbers, _ or -).' });
+        return;
+      }
+      if (password.length < AUTH_PASSWORD_MIN_LENGTH) {
+        sendJson(req, res, 400, { error: `Password must be at least ${AUTH_PASSWORD_MIN_LENGTH} characters.` });
+        return;
+      }
+
+      const emailLower = email.toLowerCase();
+      if (authUserIdByUsernameLower.has(usernameLower)) {
+        sendJson(req, res, 409, { error: 'Username is already in use.' });
+        return;
+      }
+      if (authUserIdByEmailLower.has(emailLower)) {
+        sendJson(req, res, 409, { error: 'Email is already in use.' });
+        return;
+      }
+
+      const userId = randomUUID();
+      const createdAt = now();
+      const passwordSaltHex = randomBytes(16).toString('hex');
+      const passwordHash = hashPassword(password, passwordSaltHex);
+      /** @type {AuthUserRecord} */
+      const user = {
+        userId,
+        username,
+        usernameLower,
+        email,
+        emailLower,
+        country: detectCountry(req),
+        avatarId: undefined,
+        passwordSaltHex,
+        passwordHashHex: passwordHash.passwordHashHex,
+        passwordN: passwordHash.passwordN,
+        passwordR: passwordHash.passwordR,
+        passwordP: passwordHash.passwordP,
+        createdAt,
+        updatedAt: createdAt,
+      };
+      authUsersById.set(userId, user);
+      authUserIdByUsernameLower.set(usernameLower, userId);
+      authUserIdByEmailLower.set(emailLower, userId);
+
+      const session = createAuthSession(userId);
+      setAuthCookie(req, res, session.sessionId, session.expiresAt);
+
+      await Promise.all([
+        queueAuthUserPersist(),
+        queueAuthSessionPersist(),
+      ]);
+      sendJson(req, res, 201, { user: userForClient(user) });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Invalid signup payload.';
+      sendJson(req, res, 400, { error: message });
+    }
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/api/auth/login') {
+    try {
+      const body = await readJsonBody(req);
+      const username = normalizeUsername(body.username);
+      const usernameLower = username.toLowerCase();
+      const password = sanitizePassword(body.password);
+
+      if (authRateLimitExceeded(req, 'login', usernameLower)) {
+        sendJson(req, res, 429, { error: 'Too many login attempts. Please wait and try again.' });
+        return;
+      }
+
+      const userId = authUserIdByUsernameLower.get(usernameLower);
+      const user = userId ? authUsersById.get(userId) : undefined;
+      if (!user || !verifyPassword(password, user)) {
+        sendJson(req, res, 401, { error: 'Username or password is incorrect.' });
+        return;
+      }
+
+      const session = createAuthSession(user.userId);
+      setAuthCookie(req, res, session.sessionId, session.expiresAt);
+      await queueAuthSessionPersist();
+      sendJson(req, res, 200, { user: userForClient(user) });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Invalid login payload.';
+      sendJson(req, res, 400, { error: message });
+    }
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/api/auth/logout') {
+    const authContext = getAuthenticatedUser(req);
+    if (authContext) {
+      authSessions.delete(authContext.session.sessionId);
+      await queueAuthSessionPersist();
+    }
+    clearAuthCookie(req, res);
+    sendJson(req, res, 200, { loggedOut: true });
+    return;
+  }
+
+  if (req.method === 'GET' && pathname === '/api/auth/me') {
+    const authContext = getAuthenticatedUser(req);
+    if (!authContext) {
+      sendJson(req, res, 200, { authenticated: false });
+      return;
+    }
+    const refreshed = refreshAuthSession(authContext.session);
+    setAuthCookie(req, res, refreshed.sessionId, refreshed.expiresAt);
+    await queueAuthSessionPersist();
+    sendJson(req, res, 200, {
+      authenticated: true,
+      user: userForClient(authContext.user),
+    });
+    return;
+  }
+
+  if (req.method === 'PATCH' && pathname === '/api/auth/me') {
+    const authContext = getAuthenticatedUser(req);
+    if (!authContext) {
+      sendJson(req, res, 401, { error: 'Authentication required.' });
+      return;
+    }
+    try {
+      const body = await readJsonBody(req);
+      const nextCountry = normalizeCountry(String(body.country ?? ''));
+      if (nextCountry === 'Unknown') {
+        sendJson(req, res, 400, { error: 'Country must be a 2-letter country code.' });
+        return;
+      }
+      authContext.user.country = nextCountry;
+      authContext.user.updatedAt = now();
+      authUsersById.set(authContext.user.userId, authContext.user);
+      const refreshed = refreshAuthSession(authContext.session);
+      setAuthCookie(req, res, refreshed.sessionId, refreshed.expiresAt);
+      await Promise.all([
+        queueAuthUserPersist(),
+        queueAuthSessionPersist(),
+      ]);
+      sendJson(req, res, 200, { user: userForClient(authContext.user) });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Invalid profile update payload.';
+      sendJson(req, res, 400, { error: message });
+    }
+    return;
+  }
+
+  if (req.method === 'PUT' && pathname === '/api/auth/me/avatar') {
+    const authContext = getAuthenticatedUser(req);
+    if (!authContext) {
+      sendJson(req, res, 401, { error: 'Authentication required.' });
+      return;
+    }
+    try {
+      const body = await readJsonBody(req);
+      const dataUrl = typeof body.dataUrl === 'string' ? body.dataUrl.trim() : '';
+      const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
+      if (!match) {
+        sendJson(req, res, 400, { error: 'Avatar must be a base64 data URL.' });
+        return;
+      }
+
+      const mimeType = match[1].trim().toLowerCase();
+      const dataBase64 = match[2].trim();
+      if (!ALLOWED_AVATAR_MIME_TYPES.has(mimeType)) {
+        sendJson(req, res, 400, { error: 'Avatar type is unsupported. Use PNG, JPEG, WEBP, or GIF.' });
+        return;
+      }
+      const bytes = Buffer.from(dataBase64, 'base64');
+      if (bytes.byteLength === 0 || bytes.byteLength > MAX_AVATAR_BYTES) {
+        sendJson(req, res, 400, { error: `Avatar must be between 1 byte and ${MAX_AVATAR_BYTES} bytes.` });
+        return;
+      }
+
+      const extension = AVATAR_MIME_EXTENSION[mimeType];
+      const avatarId = `${randomUUID()}${extension}`;
+      await mkdir(AUTH_AVATAR_DIR, { recursive: true });
+      await writeFile(join(AUTH_AVATAR_DIR, avatarId), bytes);
+      await removeAvatarFile(authContext.user.avatarId);
+      authContext.user.avatarId = avatarId;
+      authContext.user.updatedAt = now();
+      authUsersById.set(authContext.user.userId, authContext.user);
+      const refreshed = refreshAuthSession(authContext.session);
+      setAuthCookie(req, res, refreshed.sessionId, refreshed.expiresAt);
+      await Promise.all([
+        queueAuthUserPersist(),
+        queueAuthSessionPersist(),
+      ]);
+      sendJson(req, res, 200, {
+        avatarUrl: `/api/avatars/${encodeURIComponent(avatarId)}`,
+        user: userForClient(authContext.user),
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Invalid avatar payload.';
+      sendJson(req, res, 400, { error: message });
+    }
+    return;
+  }
+
+  if (req.method === 'DELETE' && pathname === '/api/auth/me/avatar') {
+    const authContext = getAuthenticatedUser(req);
+    if (!authContext) {
+      sendJson(req, res, 401, { error: 'Authentication required.' });
+      return;
+    }
+
+    await removeAvatarFile(authContext.user.avatarId);
+    authContext.user.avatarId = undefined;
+    authContext.user.updatedAt = now();
+    authUsersById.set(authContext.user.userId, authContext.user);
+    const refreshed = refreshAuthSession(authContext.session);
+    setAuthCookie(req, res, refreshed.sessionId, refreshed.expiresAt);
+    await Promise.all([
+      queueAuthUserPersist(),
+      queueAuthSessionPersist(),
+    ]);
+    sendJson(req, res, 200, { deleted: true, user: userForClient(authContext.user) });
+    return;
+  }
+
+  if (req.method === 'GET' && pathname === '/api/cloud-saves') {
+    const authContext = getAuthenticatedUser(req);
+    if (!authContext) {
+      sendJson(req, res, 401, { error: 'Authentication required.' });
+      return;
+    }
+    const saves = [...cloudSavesByKey.values()]
+      .filter((save) => save.userId === authContext.user.userId)
+      .sort((left, right) => right.updatedAt - left.updatedAt)
+      .map((save) => cloudSaveForClient(save, false));
+    const refreshed = refreshAuthSession(authContext.session);
+    setAuthCookie(req, res, refreshed.sessionId, refreshed.expiresAt);
+    await queueAuthSessionPersist();
+    sendJson(req, res, 200, { saves });
+    return;
+  }
+
+  if (req.method === 'GET' && pathname.startsWith('/api/cloud-saves/')) {
+    const authContext = getAuthenticatedUser(req);
+    if (!authContext) {
+      sendJson(req, res, 401, { error: 'Authentication required.' });
+      return;
+    }
+    const identity = parseCloudSavePathIdentity(pathname);
+    if (!identity) {
+      sendJson(req, res, 400, { error: 'Invalid cloud save key.' });
+      return;
+    }
+    const save = cloudSavesByKey.get(cloudSaveKey(authContext.user.userId, identity.romHash, identity.slotId));
+    if (!save) {
+      sendJson(req, res, 404, { error: 'Cloud save not found.' });
+      return;
+    }
+    const refreshed = refreshAuthSession(authContext.session);
+    setAuthCookie(req, res, refreshed.sessionId, refreshed.expiresAt);
+    await queueAuthSessionPersist();
+    sendJson(req, res, 200, { save: cloudSaveForClient(save, true) });
+    return;
+  }
+
+  if (req.method === 'PUT' && pathname === '/api/cloud-saves') {
+    const authContext = getAuthenticatedUser(req);
+    if (!authContext) {
+      sendJson(req, res, 401, { error: 'Authentication required.' });
+      return;
+    }
+    try {
+      const body = await readJsonBody(req);
+      const rawSaves = Array.isArray(body?.saves)
+        ? body.saves
+        : body?.save
+          ? [body.save]
+          : [];
+
+      let changed = false;
+      for (const rawSave of rawSaves) {
+        const normalized = normalizeCloudSaveInput(rawSave);
+        if (!normalized) {
+          continue;
+        }
+        const key = cloudSaveKey(authContext.user.userId, normalized.romHash, normalized.slotId);
+        const existing = cloudSavesByKey.get(key);
+        if (existing && normalized.updatedAt < existing.updatedAt) {
+          continue;
+        }
+        /** @type {CloudSaveRecord} */
+        const nextRecord = {
+          key,
+          userId: authContext.user.userId,
+          romHash: normalized.romHash,
+          slotId: normalized.slotId,
+          gameKey: normalized.gameKey,
+          gameTitle: normalized.gameTitle,
+          slotName: normalized.slotName,
+          updatedAt: normalized.updatedAt,
+          byteLength: normalized.byteLength,
+          dataBase64: normalized.dataBase64,
+        };
+        cloudSavesByKey.set(key, nextRecord);
+        changed = true;
+      }
+
+      if (changed) {
+        await queueCloudSavePersist();
+      }
+      const refreshed = refreshAuthSession(authContext.session);
+      setAuthCookie(req, res, refreshed.sessionId, refreshed.expiresAt);
+      await queueAuthSessionPersist();
+      const saves = [...cloudSavesByKey.values()]
+        .filter((save) => save.userId === authContext.user.userId)
+        .sort((left, right) => right.updatedAt - left.updatedAt)
+        .map((save) => cloudSaveForClient(save, false));
+      sendJson(req, res, 200, { saves });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Invalid cloud save payload.';
+      sendJson(req, res, 400, { error: message });
+    }
+    return;
+  }
+
+  if (req.method === 'DELETE' && pathname.startsWith('/api/cloud-saves/')) {
+    const authContext = getAuthenticatedUser(req);
+    if (!authContext) {
+      sendJson(req, res, 401, { error: 'Authentication required.' });
+      return;
+    }
+    const identity = parseCloudSavePathIdentity(pathname);
+    if (!identity) {
+      sendJson(req, res, 400, { error: 'Invalid cloud save key.' });
+      return;
+    }
+    const key = cloudSaveKey(authContext.user.userId, identity.romHash, identity.slotId);
+    const deleted = cloudSavesByKey.delete(key);
+    if (deleted) {
+      await queueCloudSavePersist();
+    }
+    const refreshed = refreshAuthSession(authContext.session);
+    setAuthCookie(req, res, refreshed.sessionId, refreshed.expiresAt);
+    await queueAuthSessionPersist();
+    sendJson(req, res, 200, { deleted });
     return;
   }
 
   if (req.method === 'GET' && pathname === '/api/controller-profiles') {
-    sendJson(res, 200, { profiles: listSharedProfiles() });
+    sendJson(req, res, 200, { profiles: listSharedProfiles() });
     return;
   }
 
@@ -978,10 +2092,10 @@ const httpServer = createServer(async (req, res) => {
         await queueProfilePersist();
       }
 
-      sendJson(res, 200, { profiles: listSharedProfiles(), updated });
+      sendJson(req, res, 200, { profiles: listSharedProfiles(), updated });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Invalid profile payload.';
-      sendJson(res, 400, { error: message });
+      sendJson(req, res, 400, { error: message });
     }
     return;
   }
@@ -989,7 +2103,7 @@ const httpServer = createServer(async (req, res) => {
   if (req.method === 'DELETE' && pathname.startsWith('/api/controller-profiles/')) {
     const profileId = parseControllerProfileId(pathname);
     if (!profileId) {
-      sendJson(res, 400, { error: 'Invalid profile id.' });
+      sendJson(req, res, 400, { error: 'Invalid profile id.' });
       return;
     }
 
@@ -998,7 +2112,7 @@ const httpServer = createServer(async (req, res) => {
       await queueProfilePersist();
     }
 
-    sendJson(res, 200, { deleted });
+    sendJson(req, res, 200, { deleted });
     return;
   }
 
@@ -1039,14 +2153,14 @@ const httpServer = createServer(async (req, res) => {
 
       sessions.set(code, session);
 
-      sendJson(res, 201, {
+      sendJson(req, res, 201, {
         code,
         clientId: hostClientId,
         session: publicSession(session),
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Invalid session create payload.';
-      sendJson(res, 400, { error: message });
+      sendJson(req, res, 400, { error: message });
     }
     return;
   }
@@ -1054,24 +2168,24 @@ const httpServer = createServer(async (req, res) => {
   if (req.method === 'POST' && pathname.startsWith('/api/multiplayer/sessions/') && pathname.endsWith('/join')) {
     const code = parseSessionCodeFromPath(pathname);
     if (!code) {
-      sendJson(res, 404, { error: 'Session route not found.' });
+      sendJson(req, res, 404, { error: 'Session route not found.' });
       return;
     }
 
     const session = sessions.get(code);
     if (!session) {
-      sendJson(res, 404, { error: 'Invite code was not found.' });
+      sendJson(req, res, 404, { error: 'Invite code was not found.' });
       return;
     }
 
     if (session.joinLocked) {
-      sendJson(res, 423, { error: 'This room is locked by the host. Ask the host to unlock joins.' });
+      sendJson(req, res, 423, { error: 'This room is locked by the host. Ask the host to unlock joins.' });
       return;
     }
 
     const openSlot = findOpenPlayerSlot(session);
     if (!openSlot) {
-      sendJson(res, 409, { error: 'Session is full (maximum 4 players).' });
+      sendJson(req, res, 409, { error: 'Session is full (maximum 4 players).' });
       return;
     }
 
@@ -1092,7 +2206,7 @@ const httpServer = createServer(async (req, res) => {
         joinedAt: Date.now(),
       });
 
-      sendJson(res, 200, {
+      sendJson(req, res, 200, {
         code,
         clientId,
         session: publicSession(session),
@@ -1100,7 +2214,7 @@ const httpServer = createServer(async (req, res) => {
       broadcastRoomState(session);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Invalid join payload.';
-      sendJson(res, 400, { error: message });
+      sendJson(req, res, 400, { error: message });
     }
     return;
   }
@@ -1108,13 +2222,13 @@ const httpServer = createServer(async (req, res) => {
   if (req.method === 'POST' && pathname.startsWith('/api/multiplayer/sessions/') && pathname.endsWith('/close')) {
     const code = parseSessionCodeFromPath(pathname);
     if (!code) {
-      sendJson(res, 404, { error: 'Session route not found.' });
+      sendJson(req, res, 404, { error: 'Session route not found.' });
       return;
     }
 
     const session = sessions.get(code);
     if (!session) {
-      sendJson(res, 404, { error: 'Invite code was not found.' });
+      sendJson(req, res, 404, { error: 'Invite code was not found.' });
       return;
     }
 
@@ -1122,7 +2236,7 @@ const httpServer = createServer(async (req, res) => {
       const body = await readJsonBody(req);
       const clientId = typeof body.clientId === 'string' ? body.clientId : '';
       if (clientId !== session.hostClientId) {
-        sendJson(res, 403, { error: 'Only the host can close this session.' });
+        sendJson(req, res, 403, { error: 'Only the host can close this session.' });
         return;
       }
 
@@ -1131,13 +2245,13 @@ const httpServer = createServer(async (req, res) => {
         notifyReason: 'Host ended the session.',
         socketReason: 'Host ended session',
       });
-      sendJson(res, 200, {
+      sendJson(req, res, 200, {
         closed: true,
         code,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Invalid close payload.';
-      sendJson(res, 400, { error: message });
+      sendJson(req, res, 400, { error: message });
     }
     return;
   }
@@ -1145,13 +2259,13 @@ const httpServer = createServer(async (req, res) => {
   if (req.method === 'POST' && pathname.startsWith('/api/multiplayer/sessions/') && pathname.endsWith('/kick')) {
     const code = parseSessionCodeFromPath(pathname);
     if (!code) {
-      sendJson(res, 404, { error: 'Session route not found.' });
+      sendJson(req, res, 404, { error: 'Session route not found.' });
       return;
     }
 
     const session = sessions.get(code);
     if (!session) {
-      sendJson(res, 404, { error: 'Invite code was not found.' });
+      sendJson(req, res, 404, { error: 'Invite code was not found.' });
       return;
     }
 
@@ -1160,13 +2274,13 @@ const httpServer = createServer(async (req, res) => {
       const clientId = typeof body.clientId === 'string' ? body.clientId : '';
       const targetClientId = typeof body.targetClientId === 'string' ? body.targetClientId : '';
       if (clientId !== session.hostClientId) {
-        sendJson(res, 403, { error: 'Only the host can kick players.' });
+        sendJson(req, res, 403, { error: 'Only the host can kick players.' });
         return;
       }
 
       const target = session.members.get(targetClientId);
       if (!target || target.isHost) {
-        sendJson(res, 404, { error: 'Kick target was not found.' });
+        sendJson(req, res, 404, { error: 'Kick target was not found.' });
         return;
       }
 
@@ -1178,14 +2292,14 @@ const httpServer = createServer(async (req, res) => {
       });
       broadcastRoomState(session);
 
-      sendJson(res, 200, {
+      sendJson(req, res, 200, {
         kicked: true,
         code,
         targetClientId,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Invalid kick payload.';
-      sendJson(res, 400, { error: message });
+      sendJson(req, res, 400, { error: message });
     }
     return;
   }
@@ -1193,23 +2307,23 @@ const httpServer = createServer(async (req, res) => {
   if (req.method === 'GET' && isSessionBasePath(pathname)) {
     const code = parseSessionCodeFromPath(pathname);
     if (!code) {
-      sendJson(res, 404, { error: 'Session route not found.' });
+      sendJson(req, res, 404, { error: 'Session route not found.' });
       return;
     }
 
     const session = sessions.get(code);
     if (!session) {
-      sendJson(res, 404, { error: 'Invite code was not found.' });
+      sendJson(req, res, 404, { error: 'Invite code was not found.' });
       return;
     }
 
-    sendJson(res, 200, {
+    sendJson(req, res, 200, {
       session: publicSession(session),
     });
     return;
   }
 
-  sendJson(res, 404, { error: 'Not found.' });
+  sendJson(req, res, 404, { error: 'Not found.' });
 });
 
 const wsServer = new WebSocketServer({ noServer: true });
@@ -1300,8 +2414,25 @@ httpServer.on('upgrade', (req, socket, head) => {
   });
 });
 
-await loadSharedProfilesFromDisk();
+await Promise.all([
+  loadSharedProfilesFromDisk(),
+  loadUsersFromDisk(),
+  loadAuthSessionsFromDisk(),
+  loadCloudSavesFromDisk(),
+]);
+
+for (const [sessionId, session] of authSessions.entries()) {
+  if (session.expiresAt <= now()) {
+    authSessions.delete(sessionId);
+  }
+}
+
+await mkdir(AUTH_AVATAR_DIR, { recursive: true });
+
 console.log(`Loaded ${sharedControllerProfiles.size} shared controller profile(s) from ${CONTROLLER_PROFILE_STORE_PATH}.`);
+console.log(`Loaded ${authUsersById.size} auth user(s) from ${AUTH_USER_STORE_PATH}.`);
+console.log(`Loaded ${authSessions.size} auth session(s) from ${AUTH_SESSION_STORE_PATH}.`);
+console.log(`Loaded ${cloudSavesByKey.size} cloud save(s) from ${CLOUD_SAVE_STORE_PATH}.`);
 
 httpServer.listen(PORT, HOST, () => {
   console.log(`Multiplayer coordinator listening at http://${HOST}:${PORT}`);
