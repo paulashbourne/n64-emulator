@@ -115,6 +115,7 @@ interface HostStreamingPeerState {
   negotiated: boolean;
   disconnectTimer: number | null;
   inputChannel: RTCDataChannel | null;
+  inputChannelDisabled: boolean;
 }
 
 interface HostStreamTelemetry {
@@ -702,6 +703,7 @@ export function PlayPage() {
   const onlineHostVoicePlaybackRef = useRef<Map<string, HTMLAudioElement>>(new Map());
   const onlineHostStatsBaselineRef = useRef<Map<string, { bytesSent: number; measuredAtMs: number }>>(new Map());
   const onlineHostViewerTelemetryRef = useRef<Record<string, HostViewerStreamTelemetry>>({});
+  const onlineInputChannelFallbackNotifiedRef = useRef(false);
   const handleHostWebRtcSignalRef = useRef<((message: HostWebRtcSignalMessage) => void) | null>(null);
   const syncHostStreamingPeersRef = useRef<((session: MultiplayerSessionSnapshot) => void) | null>(null);
   const resyncHostStreamForClientRef = useRef<
@@ -1617,16 +1619,26 @@ export function PlayPage() {
 
   const ensureHostInputDataChannel = useCallback((targetClientId: string): boolean => {
     const peerState = onlineHostPeersRef.current.get(targetClientId);
-    if (!peerState || peerState.inputChannel) {
+    if (!peerState || peerState.inputChannel || peerState.inputChannelDisabled) {
       return false;
     }
 
-    const channel = peerState.connection.createDataChannel(ONLINE_INPUT_DATA_CHANNEL_LABEL, {
-      ordered: false,
-      maxRetransmits: 0,
-    });
-    attachHostInputDataChannel(targetClientId, channel);
-    return true;
+    try {
+      const channel = peerState.connection.createDataChannel(ONLINE_INPUT_DATA_CHANNEL_LABEL, {
+        ordered: false,
+        maxRetransmits: 0,
+      });
+      attachHostInputDataChannel(targetClientId, channel);
+      return true;
+    } catch {
+      // Some browsers can reject partial reliability settings; keep stream negotiation alive via relay fallback.
+      peerState.inputChannelDisabled = true;
+      if (!onlineInputChannelFallbackNotifiedRef.current) {
+        onlineInputChannelFallbackNotifiedRef.current = true;
+        setEmulatorWarningRef.current?.('Low-latency peer input channel is unavailable; using relay fallback.');
+      }
+      return false;
+    }
   }, [attachHostInputDataChannel]);
 
   const ensureHostPeerNegotiation = useCallback((targetClientId: string): void => {
@@ -1873,6 +1885,7 @@ export function PlayPage() {
           negotiated: false,
           disconnectTimer: null,
           inputChannel: null,
+          inputChannelDisabled: false,
         };
         onlineHostPeersRef.current.set(member.clientId, peerState);
       }
@@ -1933,6 +1946,7 @@ export function PlayPage() {
         negotiated: false,
         disconnectTimer: null,
         inputChannel: null,
+        inputChannelDisabled: false,
       };
       onlineHostPeersRef.current.set(senderClientId, peerState);
       ensureHostInputDataChannel(senderClientId);
