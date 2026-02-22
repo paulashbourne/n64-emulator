@@ -48,6 +48,83 @@ const KEY_CODE_BY_CODE: Record<string, number> = {
   NumpadEnter: 13,
 };
 
+const GAMEPAD_BUTTON_LABEL_BY_INDEX: Record<number, string> = {
+  0: 'BUTTON_1',
+  1: 'BUTTON_2',
+  2: 'BUTTON_3',
+  3: 'BUTTON_4',
+  4: 'LEFT_TOP_SHOULDER',
+  5: 'RIGHT_TOP_SHOULDER',
+  6: 'LEFT_BOTTOM_SHOULDER',
+  7: 'RIGHT_BOTTOM_SHOULDER',
+  8: 'SELECT',
+  9: 'START',
+  10: 'LEFT_STICK',
+  11: 'RIGHT_STICK',
+  12: 'DPAD_UP',
+  13: 'DPAD_DOWN',
+  14: 'DPAD_LEFT',
+  15: 'DPAD_RIGHT',
+};
+
+const GAMEPAD_AXIS_NAME_BY_INDEX: Record<number, string> = {
+  0: 'LEFT_STICK_X',
+  1: 'LEFT_STICK_Y',
+  2: 'RIGHT_STICK_X',
+  3: 'RIGHT_STICK_Y',
+};
+
+function gamepadButtonLabel(index: number): string {
+  return GAMEPAD_BUTTON_LABEL_BY_INDEX[index] ?? `GAMEPAD_${index}`;
+}
+
+function gamepadAxisName(index: number): string {
+  return GAMEPAD_AXIS_NAME_BY_INDEX[index] ?? `EXTRA_STICK_${index}`;
+}
+
+function axisDirectionForDiscreteValue(value: number): 'positive' | 'negative' | null {
+  if (value >= 0.5) {
+    return 'positive';
+  }
+  if (value <= -0.5) {
+    return 'negative';
+  }
+  return null;
+}
+
+function connectedGamepadSelections(): string[] {
+  if (typeof navigator === 'undefined' || typeof navigator.getGamepads !== 'function') {
+    return [];
+  }
+
+  const gamepads = Array.from(navigator.getGamepads()).filter((pad): pad is Gamepad => Boolean(pad));
+  return gamepads.map((pad) => `${pad.id}_${pad.index}`);
+}
+
+function ensurePrimaryGamepadSelection(
+  emulator: {
+    gamepadSelection?: string[];
+    updateGamepadLabels?: () => void;
+  },
+): void {
+  if (!Array.isArray(emulator.gamepadSelection)) {
+    return;
+  }
+
+  const connectedSelections = connectedGamepadSelections();
+  if (connectedSelections.length === 0) {
+    return;
+  }
+
+  const currentSelection = emulator.gamepadSelection[0];
+  if (typeof currentSelection === 'string' && connectedSelections.includes(currentSelection)) {
+    return;
+  }
+
+  emulator.gamepadSelection[0] = connectedSelections[0];
+  emulator.updateGamepadLabels?.();
+}
+
 function keyboardCodeToKeyCode(code?: string): number | undefined {
   if (!code) {
     return undefined;
@@ -103,7 +180,7 @@ export function controllerProfileToEmulatorJsControls(profile?: ControllerProfil
     }
 
     if (binding.source === 'gamepad_button' && typeof binding.index === 'number') {
-      entry.value2 = binding.index;
+      entry.value2 = gamepadButtonLabel(binding.index);
     }
 
     if (
@@ -111,7 +188,20 @@ export function controllerProfileToEmulatorJsControls(profile?: ControllerProfil
       typeof binding.index === 'number' &&
       binding.direction
     ) {
-      entry.value2 = `${binding.index}:${binding.direction === 'positive' ? 1 : -1}`;
+      const axisName = gamepadAxisName(binding.index);
+      entry.value2 = `${axisName}:${binding.direction === 'positive' ? 1 : -1}`;
+    }
+
+    if (
+      binding.source === 'gamepad_axis' &&
+      typeof binding.index === 'number' &&
+      typeof binding.axisValue === 'number'
+    ) {
+      const discreteDirection = axisDirectionForDiscreteValue(binding.axisValue);
+      if (discreteDirection) {
+        const axisName = gamepadAxisName(binding.index);
+        entry.value2 = `${axisName}:${discreteDirection === 'positive' ? 1 : -1}`;
+      }
     }
 
     if (entry.value !== undefined || entry.value2 !== undefined) {
@@ -142,6 +232,7 @@ export function applyProfileToRunningEmulator(profile?: ControllerProfile): bool
     ...(emulator.controls ?? {}),
     0: controls[0],
   };
+  ensurePrimaryGamepadSelection(emulator as { gamepadSelection?: string[]; updateGamepadLabels?: () => void });
 
   emulator.setupKeys?.();
   emulator.checkGamepadInputs?.();
