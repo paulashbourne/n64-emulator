@@ -412,11 +412,14 @@ export function ControllerWizard({
                   </span>
                   {effectiveSaveMode === 'edit' ? (
                     <button
+                      className="wizard-summary-remap-button"
                       type="button"
                       onClick={() => onRemapSingleControl(entry.target)}
                       disabled={isSaving || isCapturing}
+                      title={`Remap ${entry.label}`}
+                      aria-label={`Remap ${entry.label}`}
                     >
-                      {singleRemapTarget === entry.target ? (isCapturing ? 'Listening…' : 'Remap Selected') : 'Remap Only'}
+                      {singleRemapTarget === entry.target ? (isCapturing ? 'Listening…' : 'Remapping') : 'Remap'}
                     </button>
                   ) : null}
                 </li>

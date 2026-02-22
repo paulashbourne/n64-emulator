@@ -1722,17 +1722,29 @@ label {
 
 .wizard-summary li {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 0.8rem;
+  grid-template-columns: minmax(5.6rem, 0.62fr) minmax(0, 1.55fr) auto;
+  align-items: start;
+  gap: 0.6rem;
   border-bottom: 1px dashed rgba(255, 255, 255, 0.24);
   padding-bottom: 0.35rem;
 }
 
 .wizard-summary-binding {
-  text-align: right;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  text-align: left;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.2;
+  min-width: 0;
+}
+
+.wizard-summary-remap-button {
+  margin: 0;
+  align-self: start;
+  min-height: 1.9rem;
+  padding: 0.24rem 0.56rem;
+  font-size: 0.82rem;
+  line-height: 1.1;
   white-space: nowrap;
 }
 
@@ -3603,6 +3615,10 @@ label {
 
   .wizard-summary-binding {
     text-align: left;
+  }
+
+  .wizard-summary-remap-button {
+    justify-self: start;
   }
 
   .play-overlay-top {
