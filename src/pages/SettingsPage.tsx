@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
 
 import { ControllerWizard } from '../components/ControllerWizard';
+import { UX_ONBOARDING_V2_ENABLED } from '../config/uxFlags';
 import type { EmulatorBootMode } from '../emulator/emulatorJsRuntime';
 import {
   getAdvancedSaveSlotsEnabled,
@@ -10,6 +11,8 @@ import {
 } from '../storage/appSettings';
 import { clearIndexedData } from '../storage/db';
 import { useAppStore } from '../state/appStore';
+import { useOnboardingStore } from '../state/onboardingStore';
+import { useUiStore } from '../state/uiStore';
 import type { ControllerProfile } from '../types/input';
 
 const DEFAULT_KEYBOARD_PROFILE_ID = 'profile:keyboard-default';
@@ -232,6 +235,9 @@ export function SettingsPage() {
   const removeProfile = useAppStore((state) => state.removeProfile);
   const setActiveProfile = useAppStore((state) => state.setActiveProfile);
   const refreshRoms = useAppStore((state) => state.refreshRoms);
+  const reopenChecklist = useOnboardingStore((state) => state.reopenChecklist);
+  const markOnboardingStepComplete = useOnboardingStore((state) => state.markStepComplete);
+  const addToast = useUiStore((state) => state.addToast);
 
   const [working, setWorking] = useState(false);
   const [savingBootMode, setSavingBootMode] = useState(false);
@@ -483,6 +489,15 @@ export function SettingsPage() {
   const setFeedback = (value: string | undefined, tone: 'info' | 'success' | 'error' = 'info'): void => {
     setMessage(value);
     setMessageTone(tone);
+    if (!value) {
+      return;
+    }
+    addToast({
+      tone: tone === 'error' ? 'error' : tone === 'success' ? 'success' : 'info',
+      title: 'Settings',
+      message: value,
+      dedupeKey: `settings:${tone}:${value}`,
+    });
   };
 
   const clearProfileFilters = (): void => {
@@ -642,11 +657,17 @@ export function SettingsPage() {
     setWizardOpen(false);
     setWizardMode('create');
     setWizardTemplateProfile(undefined);
+    if (UX_ONBOARDING_V2_ENABLED) {
+      markOnboardingStepComplete('verify_controls');
+    }
     setFeedback(`Saved controller profile "${profile.name}".`, 'success');
   };
 
   const onSetKeyboardDefaultActive = (): void => {
     setActiveProfile(DEFAULT_KEYBOARD_PROFILE_ID);
+    if (UX_ONBOARDING_V2_ENABLED) {
+      markOnboardingStepComplete('verify_controls');
+    }
     setFeedback('Activated Keyboard Default profile.', 'success');
   };
 
@@ -765,6 +786,19 @@ export function SettingsPage() {
             Danger Zone <span className="settings-jump-shortcut">4</span>
           </button>
         </nav>
+        {UX_ONBOARDING_V2_ENABLED ? (
+          <div className="wizard-actions settings-onboarding-actions">
+            <button
+              type="button"
+              onClick={() => {
+                reopenChecklist();
+                setFeedback('Reopened the first-run checklist.', 'info');
+              }}
+            >
+              Reopen First-Run Checklist
+            </button>
+          </div>
+        ) : null}
         <p className="settings-shortcuts-hint settings-header-shortcuts-hint">
           Shortcuts: <code>1-4</code> jump sections, <code>Shift+1-4</code> toggle section visibility, <code>/</code>{' '}
           focus profile search.

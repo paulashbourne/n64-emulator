@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ChangeEvent } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 
+import { OnboardingChecklistCard } from '../components/OnboardingChecklistCard';
+import { UX_ONBOARDING_V2_ENABLED } from '../config/uxFlags';
 import {
   deleteSaveSlotsForGame,
   listSaveSummariesByGame,
@@ -10,6 +12,8 @@ import {
 import { buildSessionPlayUrl, buildSessionRoute } from '../online/sessionLinks';
 import { coverInventorySize, matchRomCoverArt, type RomCoverArtMatch } from '../roms/coverArtService';
 import { useAppStore } from '../state/appStore';
+import { useOnboardingStore } from '../state/onboardingStore';
+import { useUiStore } from '../state/uiStore';
 import type { SaveGameSummary } from '../types/save';
 
 interface CoverArtThumbProps {
@@ -188,7 +192,6 @@ export function LibraryPage() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const initialUiPreferences = useMemo(() => loadLibraryUiPreferences(), []);
-  const [infoMessage, setInfoMessage] = useState<string>();
   const [playedOnly, setPlayedOnly] = useState(initialUiPreferences.playedOnly);
   const [hasSavesOnly, setHasSavesOnly] = useState(initialUiPreferences.hasSavesOnly);
   const [coverMatchedOnly, setCoverMatchedOnly] = useState(initialUiPreferences.coverMatchedOnly);
@@ -244,7 +247,13 @@ export function LibraryPage() {
   const importFiles = useAppStore((state) => state.importFiles);
   const removeRom = useAppStore((state) => state.removeRom);
   const toggleFavorite = useAppStore((state) => state.toggleFavorite);
+  const addToast = useUiStore((state) => state.addToast);
+  const upsertTaskBanner = useUiStore((state) => state.upsertTaskBanner);
+  const clearTaskBanner = useUiStore((state) => state.clearTaskBanner);
+  const markOnboardingStepComplete = useOnboardingStore((state) => state.markStepComplete);
   const [localSearchTerm, setLocalSearchTerm] = useState(searchTerm);
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedRomIds, setSelectedRomIds] = useState<Set<string>>(new Set());
 
   const libraryStats = useMemo(() => {
     const totalSizeBytes = roms.reduce((sum, rom) => sum + rom.size, 0);
@@ -382,6 +391,31 @@ export function LibraryPage() {
     }
     return count;
   }, [coverMatches]);
+  const recentlyPlayedRoms = useMemo(
+    () =>
+      [...roms]
+        .filter((rom) => typeof rom.lastPlayed === 'number')
+        .sort((left, right) => (right.lastPlayed ?? 0) - (left.lastPlayed ?? 0))
+        .slice(0, 6),
+    [roms],
+  );
+  const needsAttentionRoms = useMemo(
+    () =>
+      roms
+        .filter((rom) => {
+          const identity = saveIdentityByRomId.get(rom.id);
+          const summary = identity ? saveSummaryByGameKey.get(identity.gameKey) : undefined;
+          const variantCount = identity ? variantCountByGameKey.get(identity.gameKey) ?? 1 : 1;
+          return !coverMatches.get(rom.id) || !summary?.primarySlotId || variantCount > 1;
+        })
+        .slice(0, 8),
+    [coverMatches, roms, saveIdentityByRomId, saveSummaryByGameKey, variantCountByGameKey],
+  );
+  const selectedCount = selectedRomIds.size;
+  const selectedRoms = useMemo(
+    () => roms.filter((rom) => selectedRomIds.has(rom.id)),
+    [roms, selectedRomIds],
+  );
   const activeFilterChips = useMemo(
     () =>
       [
@@ -550,16 +584,21 @@ export function LibraryPage() {
   }, [localSearchTerm, searchTerm, setSearchTerm]);
 
   useEffect(() => {
-    if (!infoMessage) {
-      return;
+    if (UX_ONBOARDING_V2_ENABLED && roms.length > 0) {
+      markOnboardingStepComplete('import_rom');
     }
-    const timer = window.setTimeout(() => {
-      setInfoMessage((current) => (current === infoMessage ? undefined : current));
-    }, 4200);
-    return () => {
-      window.clearTimeout(timer);
-    };
-  }, [infoMessage]);
+  }, [markOnboardingStepComplete, roms.length]);
+
+  useEffect(() => {
+    setSelectedRomIds((current) => {
+      if (current.size === 0) {
+        return current;
+      }
+      const validIds = new Set(roms.map((rom) => rom.id));
+      const next = new Set([...current].filter((id) => validIds.has(id)));
+      return next.size === current.size ? current : next;
+    });
+  }, [roms]);
 
   useEffect(() => {
     const isTextEntryTarget = (target: EventTarget | null): boolean => {
@@ -637,37 +676,175 @@ export function LibraryPage() {
   ]);
 
   const onImportFiles = async (event: ChangeEvent<HTMLInputElement>): Promise<void> => {
-    setInfoMessage(undefined);
     const files = Array.from(event.target.files ?? []);
-    const result = await importFiles(files);
-    if (result.imported > 0 && result.skipped > 0) {
-      setInfoMessage(
-        `Imported ${result.imported} ROM${result.imported === 1 ? '' : 's'} and skipped ${result.skipped} invalid or duplicate file${result.skipped === 1 ? '' : 's'}.`,
-      );
-    } else if (result.imported > 0) {
-      setInfoMessage(`Imported ${result.imported} ROM${result.imported === 1 ? '' : 's'}.`);
+    if (files.length > 0) {
+      addToast({
+        tone: 'info',
+        title: 'Import started',
+        message: `Importing ${files.length} file${files.length === 1 ? '' : 's'}...`,
+        dedupeKey: 'library:import:start',
+      });
+    }
+    const queue = [...files];
+    const batchSize = 24;
+    let imported = 0;
+    let skipped = 0;
+    let processed = 0;
+    try {
+      while (queue.length > 0) {
+        const batch = queue.splice(0, batchSize);
+        const result = await importFiles(batch);
+        imported += result.imported;
+        skipped += result.skipped;
+        processed += batch.length;
+        upsertTaskBanner({
+          id: 'library:import-progress',
+          tone: 'info',
+          message: `Importing ROMs (${processed}/${files.length})`,
+          detail: `Imported ${imported}, skipped ${skipped}.`,
+          dismissible: false,
+        });
+      }
+      if (imported > 0 && skipped > 0) {
+        addToast({
+          tone: 'warning',
+          title: 'Import finished',
+          message: `Imported ${imported} ROM${imported === 1 ? '' : 's'} and skipped ${skipped} invalid or duplicate file${skipped === 1 ? '' : 's'}.`,
+          dedupeKey: 'library:import:result',
+        });
+      } else if (imported > 0) {
+        addToast({
+          tone: 'success',
+          title: 'Import finished',
+          message: `Imported ${imported} ROM${imported === 1 ? '' : 's'}.`,
+          dedupeKey: 'library:import:result',
+        });
+      }
+    } finally {
+      clearTaskBanner('library:import-progress');
     }
     event.target.value = '';
   };
 
-  const onReindexFolders = async (): Promise<void> => {
-    setInfoMessage(undefined);
-    const count = await reindexDirectories();
-    setInfoMessage(
-      count > 0
-        ? `Re-indexed ${count} stored folder${count === 1 ? '' : 's'}.`
-        : 'No previously granted folder handles were available to re-index.',
+  const toggleRomSelection = (romId: string): void => {
+    setSelectedRomIds((current) => {
+      const next = new Set(current);
+      if (next.has(romId)) {
+        next.delete(romId);
+      } else {
+        next.add(romId);
+      }
+      return next;
+    });
+  };
+
+  const onBulkFavorite = async (): Promise<void> => {
+    const targets = selectedRoms.filter((rom) => !rom.favorite);
+    if (targets.length === 0) {
+      addToast({
+        tone: 'info',
+        title: 'Bulk favorite',
+        message: 'All selected ROMs are already favorited.',
+      });
+      return;
+    }
+    for (const rom of targets) {
+      await toggleFavorite(rom.id);
+    }
+    addToast({
+      tone: 'success',
+      title: 'Bulk favorite',
+      message: `Favorited ${targets.length} ROM${targets.length === 1 ? '' : 's'}.`,
+    });
+  };
+
+  const onBulkRemove = async (): Promise<void> => {
+    if (selectedRoms.length === 0) {
+      return;
+    }
+    const confirmed = window.confirm(`Remove ${selectedRoms.length} selected ROMs from the catalog?`);
+    if (!confirmed) {
+      return;
+    }
+    for (const rom of selectedRoms) {
+      await removeRom(rom.id);
+    }
+    setSelectedRomIds(new Set());
+    addToast({
+      tone: 'success',
+      title: 'Bulk remove',
+      message: `Removed ${selectedRoms.length} ROM${selectedRoms.length === 1 ? '' : 's'} from catalog.`,
+    });
+  };
+
+  const onBulkResetSaves = async (): Promise<void> => {
+    const saveTargets = selectedRoms
+      .map((rom) => {
+        const identity = saveIdentityByRomId.get(rom.id);
+        return identity ? { rom, identity } : undefined;
+      })
+      .filter((entry): entry is { rom: (typeof selectedRoms)[number]; identity: ReturnType<typeof resolveSaveGameIdentity> } => Boolean(entry));
+    if (saveTargets.length === 0) {
+      addToast({
+        tone: 'info',
+        title: 'Bulk save reset',
+        message: 'No selected ROMs have save identities available.',
+      });
+      return;
+    }
+    const confirmed = window.confirm(`Delete saves for ${saveTargets.length} selected ROMs?`);
+    if (!confirmed) {
+      return;
+    }
+    let deletedCount = 0;
+    for (const entry of saveTargets) {
+      deletedCount += await deleteSaveSlotsForGame(entry.identity.gameKey);
+    }
+    addToast({
+      tone: deletedCount > 0 ? 'success' : 'warning',
+      title: 'Bulk save reset',
+      message:
+        deletedCount > 0
+          ? `Deleted ${deletedCount} save slot${deletedCount === 1 ? '' : 's'} from selected ROMs.`
+          : 'No save slots were found for selected ROMs.',
+    });
+    const uniqueKeys = Array.from(new Set(roms.map((entry) => saveIdentityByRomId.get(entry.id)?.gameKey))).filter(
+      (key): key is string => Boolean(key),
     );
+    setSaveSummaryByGameKey(await listSaveSummariesByGame(uniqueKeys));
+  };
+
+  const onReindexFolders = async (): Promise<void> => {
+    addToast({
+      tone: 'info',
+      title: 'Re-index started',
+      message: 'Scanning previously granted folders...',
+      dedupeKey: 'library:reindex:start',
+    });
+    const count = await reindexDirectories();
+    addToast({
+      tone: count > 0 ? 'success' : 'warning',
+      title: 'Re-index completed',
+      message:
+        count > 0
+          ? `Re-indexed ${count} stored folder${count === 1 ? '' : 's'}.`
+          : 'No previously granted folder handles were available to re-index.',
+      dedupeKey: 'library:reindex:result',
+    });
   };
 
   const onRemoveRom = async (romId: string, title: string): Promise<void> => {
-    setInfoMessage(undefined);
     const confirmed = window.confirm(`Remove "${title}" from the catalog?`);
     if (!confirmed) {
       return;
     }
     await removeRom(romId);
-    setInfoMessage(`Removed "${title}" from the catalog.`);
+    addToast({
+      tone: 'success',
+      title: 'ROM removed',
+      message: `Removed "${title}" from the catalog.`,
+      dedupeKey: `library:remove:${romId}`,
+    });
   };
 
   const buildPlayLinkWithSaveSlot = (romId: string, slotId?: string): string => {
@@ -695,9 +872,19 @@ export function LibraryPage() {
 
     const removed = await deleteSaveSlotsForGame(identity.gameKey);
     if (removed === 0) {
-      setInfoMessage(`No save slots found for "${identity.displayTitle}".`);
+      addToast({
+        tone: 'warning',
+        title: 'No saves found',
+        message: `No save slots found for "${identity.displayTitle}".`,
+        dedupeKey: `library:saves:none:${identity.gameKey}`,
+      });
     } else {
-      setInfoMessage(`Deleted ${removed} save slot${removed === 1 ? '' : 's'} for "${romTitle}".`);
+      addToast({
+        tone: 'success',
+        title: 'Save slots deleted',
+        message: `Deleted ${removed} save slot${removed === 1 ? '' : 's'} for "${romTitle}".`,
+        dedupeKey: `library:saves:deleted:${identity.gameKey}`,
+      });
     }
 
     const uniqueKeys = Array.from(new Set(roms.map((entry) => saveIdentityByRomId.get(entry.id)?.gameKey))).filter(
@@ -713,7 +900,12 @@ export function LibraryPage() {
     const nextIndex = (surpriseCursor * 7 + 3) % visibleRoms.length;
     const nextRom = visibleRoms[nextIndex];
     setSurpriseCursor((current) => current + 1);
-    setInfoMessage(`Launching surprise pick: "${nextRom.title}".`);
+    addToast({
+      tone: 'info',
+      title: 'Surprise pick',
+      message: `Launching "${nextRom.title}".`,
+      dedupeKey: 'library:surprise',
+    });
     navigate(buildSessionPlayUrl(nextRom.id, onlineSessionContext));
   };
 
@@ -725,6 +917,7 @@ export function LibraryPage() {
     setLocalSearchTerm('');
     void setSearchTerm('');
   };
+  const firstPlayableRom = visibleRoms[0] ?? roms[0];
 
   return (
     <section className="library-page">
@@ -785,6 +978,37 @@ export function LibraryPage() {
           </p>
         </div>
 
+        {UX_ONBOARDING_V2_ENABLED ? (
+          <OnboardingChecklistCard
+            className="library-onboarding-checklist"
+            actions={{
+              import_rom: browserSupportsDirectoryPicker
+                ? {
+                    label: 'Select ROM Folder',
+                    onClick: () => void indexDirectory(),
+                  }
+                : {
+                    label: 'Import ROM Files',
+                    onClick: () => fileInputRef.current?.click(),
+                  },
+              launch_game: firstPlayableRom
+                ? {
+                    label: 'Play a ROM',
+                    to: buildSessionPlayUrl(firstPlayableRom.id, onlineSessionContext),
+                  }
+                : undefined,
+              verify_controls: {
+                label: 'Open Controls',
+                to: '/settings#settings-profiles',
+              },
+              online_session: {
+                label: 'Open Online',
+                to: '/online',
+              },
+            }}
+          />
+        ) : null}
+
         {!browserSupportsDirectoryPicker ? (
           <p className="warning-text">
             Folder access is unavailable in this browser. Import individual files instead.
@@ -808,7 +1032,12 @@ export function LibraryPage() {
               <button
                 type="button"
                 onClick={() => {
-                  setInfoMessage(undefined);
+                  addToast({
+                    tone: 'info',
+                    title: 'Folder picker',
+                    message: 'Select a folder containing ROM files.',
+                    dedupeKey: 'library:folder:prompt',
+                  });
                   void indexDirectory();
                 }}
                 disabled={!browserSupportsDirectoryPicker || loadingRoms}
@@ -823,6 +1052,17 @@ export function LibraryPage() {
               </button>
               <button type="button" onClick={clearAllFilters} disabled={!hasAnyFilter}>
                 Clear Filters
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectionMode((value) => !value);
+                  if (selectionMode) {
+                    setSelectedRomIds(new Set());
+                  }
+                }}
+              >
+                {selectionMode ? 'Exit Multi-Select' : 'Multi-Select'}
               </button>
               <button
                 type="button"
@@ -991,8 +1231,30 @@ export function LibraryPage() {
           </div>
         ) : null}
 
+        {selectionMode ? (
+          <div className="library-bulk-actions">
+            <span className="status-pill">{selectedCount} selected</span>
+            <div className="wizard-actions">
+              <button type="button" onClick={() => setSelectedRomIds(new Set(visibleRoms.map((rom) => rom.id)))}>
+                Select Visible
+              </button>
+              <button type="button" onClick={() => setSelectedRomIds(new Set())} disabled={selectedCount === 0}>
+                Clear Selection
+              </button>
+              <button type="button" onClick={() => void onBulkFavorite()} disabled={selectedCount === 0}>
+                Favorite Selected
+              </button>
+              <button type="button" onClick={() => void onBulkResetSaves()} disabled={selectedCount === 0}>
+                Reset Saves
+              </button>
+              <button type="button" className="danger-button" onClick={() => void onBulkRemove()} disabled={selectedCount === 0}>
+                Remove Selected
+              </button>
+            </div>
+          </div>
+        ) : null}
+
         {romError ? <p className="library-feedback library-feedback-error" role="alert">{romError}</p> : null}
-        {infoMessage ? <p className="library-feedback library-feedback-info" role="status">{infoMessage}</p> : null}
       </header>
 
       {onlineSessionContext ? (
@@ -1007,9 +1269,63 @@ export function LibraryPage() {
         </section>
       ) : null}
 
+      {recentlyPlayedRoms.length > 0 ? (
+        <section className="panel library-rail-panel">
+          <div className="panel-header-inline">
+            <h2>Recently Played</h2>
+            <span className="status-pill">{recentlyPlayedRoms.length}</span>
+          </div>
+          <div className="library-rail-list">
+            {recentlyPlayedRoms.map((rom) => (
+              <Link key={rom.id} to={buildSessionPlayUrl(rom.id, onlineSessionContext)} className="library-rail-item">
+                <strong>{rom.title}</strong>
+                <span className="online-subtle">
+                  {rom.lastPlayed ? `Played ${new Date(rom.lastPlayed).toLocaleString()}` : 'Played recently'}
+                </span>
+              </Link>
+            ))}
+          </div>
+        </section>
+      ) : null}
+
+      {needsAttentionRoms.length > 0 ? (
+        <section className="panel library-rail-panel">
+          <div className="panel-header-inline">
+            <h2>Needs Attention</h2>
+            <span className="status-pill status-warn">{needsAttentionRoms.length}</span>
+          </div>
+          <p className="online-subtle">These games are missing cover art, missing save progress, or have duplicate variants.</p>
+          <div className="library-rail-list">
+            {needsAttentionRoms.map((rom) => (
+              <div key={rom.id} className="library-rail-item">
+                <strong>{rom.title}</strong>
+                <span className="online-subtle">
+                  {!coverMatches.get(rom.id) ? 'No cover match' : null}
+                  {!coverMatches.get(rom.id) && !saveSummaryByGameKey.get(saveIdentityByRomId.get(rom.id)?.gameKey ?? '')?.primarySlotId
+                    ? ' • '
+                    : null}
+                  {!saveSummaryByGameKey.get(saveIdentityByRomId.get(rom.id)?.gameKey ?? '')?.primarySlotId ? 'No save yet' : null}
+                  {(() => {
+                    const identity = saveIdentityByRomId.get(rom.id);
+                    const variantCount = identity ? variantCountByGameKey.get(identity.gameKey) ?? 1 : 1;
+                    return variantCount > 1 ? ` • ${variantCount} variants` : '';
+                  })()}
+                </span>
+              </div>
+            ))}
+          </div>
+        </section>
+      ) : null}
+
       <section className="panel">
         <h2>Catalog ({visibleRoms.length})</h2>
-        {loadingRoms ? <p>Loading ROMs…</p> : null}
+        {loadingRoms ? (
+          <div className="library-loading-skeletons" aria-hidden="true">
+            <div className="skeleton-block" style={{ height: '2.4rem' }} />
+            <div className="skeleton-block" style={{ height: '2.4rem' }} />
+            <div className="skeleton-block" style={{ height: '2.4rem' }} />
+          </div>
+        ) : null}
 
         {visibleRoms.length === 0 && !loadingRoms ? (
           <div className="library-empty-state">
@@ -1018,11 +1334,29 @@ export function LibraryPage() {
                 ? 'No ROMs indexed yet. Select a folder or import files to begin.'
                 : 'No ROMs match your current quick filters. Reset filters to see the full catalog.'}
             </p>
-            {roms.length > 0 ? (
-              <button type="button" onClick={clearAllFilters}>
-                Clear All Filters
-              </button>
-            ) : null}
+            <div className="wizard-actions">
+              {roms.length === 0 ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (browserSupportsDirectoryPicker) {
+                        void indexDirectory();
+                        return;
+                      }
+                      fileInputRef.current?.click();
+                    }}
+                  >
+                    {browserSupportsDirectoryPicker ? 'Select ROM Folder' : 'Import ROM Files'}
+                  </button>
+                  <Link to="/settings#settings-profiles">Open Controls</Link>
+                </>
+              ) : (
+                <button type="button" onClick={clearAllFilters}>
+                  Clear All Filters
+                </button>
+              )}
+            </div>
           </div>
         ) : (
           <ul className={`rom-list ${viewMode === 'grid' ? 'rom-list-grid' : ''}`} aria-label="ROM catalog list">
@@ -1037,8 +1371,23 @@ export function LibraryPage() {
                 ? buildPlayLinkWithSaveSlot(rom.id, saveSummary?.primarySlotId)
                 : buildSessionPlayUrl(rom.id, onlineSessionContext);
               return (
-                <li key={rom.id} className={`rom-row rom-card ${rom.favorite ? 'favorite' : ''} ${viewMode === 'grid' ? 'rom-card-grid' : ''}`}>
+                <li
+                  key={rom.id}
+                  className={`rom-row rom-card ${rom.favorite ? 'favorite' : ''} ${viewMode === 'grid' ? 'rom-card-grid' : ''} ${
+                    selectionMode && selectedRomIds.has(rom.id) ? 'rom-card-selected' : ''
+                  }`}
+                >
                   <div className={`rom-card-main ${viewMode === 'grid' ? 'rom-card-main-grid' : ''}`}>
+                    {selectionMode ? (
+                      <label className="library-row-selector">
+                        <input
+                          type="checkbox"
+                          checked={selectedRomIds.has(rom.id)}
+                          onChange={() => toggleRomSelection(rom.id)}
+                        />
+                        <span>Select</span>
+                      </label>
+                    ) : null}
                     <CoverArtThumb title={rom.title} art={coverMatch} className={`rom-card-cover ${viewMode === 'grid' ? 'rom-card-cover-grid' : ''}`} />
                     <div className="rom-card-copy">
                       <h3>{rom.title}</h3>

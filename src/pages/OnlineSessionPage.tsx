@@ -4,6 +4,7 @@ import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { ControllerWizard } from '../components/ControllerWizard';
 import { InSessionSettingsModal } from '../components/InSessionSettingsModal';
 import { VirtualController } from '../components/VirtualController';
+import { UX_ONBOARDING_V2_ENABLED, UX_ONLINE_FLOW_V2_ENABLED, UX_PREF_SYNC_V1_ENABLED } from '../config/uxFlags';
 import { closeOnlineSession, getOnlineSession, kickOnlineMember, multiplayerSocketUrl } from '../online/multiplayerApi';
 import { buildAnalogInputPayload, buildDigitalInputPayload } from '../online/joinerInput';
 import { describeRemoteInputPayload, parseRemoteInputPayload } from '../online/remoteInputBridge';
@@ -16,6 +17,8 @@ import {
 import { WEBRTC_CONFIGURATION } from '../online/webrtcConfig';
 import { createInputPoller } from '../input/inputService';
 import { useAppStore } from '../state/appStore';
+import { useOnboardingStore } from '../state/onboardingStore';
+import { usePreferencesStore } from '../state/preferencesStore';
 import type {
   HostStreamQualityPresetHint,
   MultiplayerDigitalInputPayload,
@@ -719,6 +722,10 @@ export function OnlineSessionPage() {
   const loadProfiles = useAppStore((state) => state.loadProfiles);
   const saveProfile = useAppStore((state) => state.saveProfile);
   const setActiveProfile = useAppStore((state) => state.setActiveProfile);
+  const markOnboardingStepComplete = useOnboardingStore((state) => state.markStepComplete);
+  const preferencesInitialized = usePreferencesStore((state) => state.initialized);
+  const syncedOnlinePreferences = usePreferencesStore((state) => state.preferences.online);
+  const updateOnlinePreferences = usePreferencesStore((state) => state.updateOnlinePreferences);
 
   const socketRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<number | null>(null);
@@ -787,6 +794,7 @@ export function OnlineSessionPage() {
   const captureRemoteInputDiagnosticsRef = useRef(false);
   const lastRemoteInputCountRef = useRef<number | null>(null);
   const clipboardTimerRef = useRef<number | null>(null);
+  const appliedSyncedOnlinePrefsRef = useRef(false);
   const lastChatCountRef = useRef<number | null>(null);
   const initialViewPrefs = useMemo(() => loadOnlineSessionViewPreferences(), []);
   const [advancedSessionTools] = useState(false);
@@ -897,6 +905,11 @@ export function OnlineSessionPage() {
 
   const currentMember = session?.members.find((member) => member.clientId === clientId);
   const isHost = currentMember?.isHost ?? false;
+  useEffect(() => {
+    if (UX_ONBOARDING_V2_ENABLED && socketStatus === 'connected' && currentMember) {
+      markOnboardingStepComplete('online_session');
+    }
+  }, [currentMember, markOnboardingStepComplete, socketStatus]);
   const isHostRef = useRef(isHost);
   useEffect(() => {
     hostStreamStatusRef.current = hostStreamStatus;
@@ -1459,6 +1472,29 @@ export function OnlineSessionPage() {
   }, [clientId, normalizedCode]);
 
   useEffect(() => {
+    if (!UX_PREF_SYNC_V1_ENABLED || !preferencesInitialized || appliedSyncedOnlinePrefsRef.current) {
+      return;
+    }
+    appliedSyncedOnlinePrefsRef.current = true;
+
+    if (typeof syncedOnlinePreferences.guestFocusMode === 'boolean') {
+      setGuestFocusMode(syncedOnlinePreferences.guestFocusMode);
+    }
+    if (typeof syncedOnlinePreferences.showVirtualController === 'boolean') {
+      setShowVirtualController(syncedOnlinePreferences.showVirtualController);
+    }
+    if (syncedOnlinePreferences.guestInputRelayMode) {
+      setGuestInputRelayMode(syncedOnlinePreferences.guestInputRelayMode);
+    }
+    if (typeof syncedOnlinePreferences.hostControlsCollapsed === 'boolean') {
+      setHostControlsCollapsed(syncedOnlinePreferences.hostControlsCollapsed);
+    }
+    if (typeof syncedOnlinePreferences.hostChatCollapsed === 'boolean') {
+      setHostChatCollapsed(syncedOnlinePreferences.hostChatCollapsed);
+    }
+  }, [preferencesInitialized, syncedOnlinePreferences]);
+
+  useEffect(() => {
     if (typeof window === 'undefined') {
       return;
     }
@@ -1505,6 +1541,29 @@ export function OnlineSessionPage() {
     showVirtualController,
     virtualControllerCollapsed,
     virtualControllerMode,
+  ]);
+
+  useEffect(() => {
+    if (!UX_PREF_SYNC_V1_ENABLED || !preferencesInitialized) {
+      return;
+    }
+    void updateOnlinePreferences({
+      guestFocusMode,
+      showVirtualController,
+      guestInputRelayMode,
+      hostControlsCollapsed,
+      hostChatCollapsed,
+    }).catch(() => {
+      // Preference sync is best-effort.
+    });
+  }, [
+    guestFocusMode,
+    guestInputRelayMode,
+    hostChatCollapsed,
+    hostControlsCollapsed,
+    preferencesInitialized,
+    showVirtualController,
+    updateOnlinePreferences,
   ]);
 
   useEffect(() => {
@@ -3732,6 +3791,26 @@ export function OnlineSessionPage() {
     setShowGuestDiagnostics((value) => !value);
   }, [isHost]);
 
+  const onRecoverSessionUi = useCallback((): void => {
+    const defaults = defaultOnlineSessionViewPreferences();
+    setGuestFocusMode(defaults.guestFocusMode);
+    setShowVirtualController(defaults.showVirtualController);
+    setShowGuestInputDeck(defaults.showGuestInputDeck);
+    setVirtualControllerMode(defaults.virtualControllerMode);
+    setVirtualControllerCollapsed(defaults.virtualControllerCollapsed);
+    setGuestInputRelayMode(defaults.guestInputRelayMode);
+    setShowGuestDiagnostics(defaults.showGuestDiagnostics);
+    setGuestQuickbarExpanded(defaults.guestQuickbarExpanded);
+    setGuestPlayersCollapsed(defaults.guestPlayersCollapsed);
+    setGuestChatCollapsed(defaults.guestChatCollapsed);
+    setHostPlayersCollapsed(defaults.hostPlayersCollapsed);
+    setHostControlsCollapsed(defaults.hostControlsCollapsed);
+    setHostChatCollapsed(defaults.hostChatCollapsed);
+    setHostRemoteFeedCollapsed(defaults.hostRemoteFeedCollapsed);
+    setHostQuickbarExpanded(defaults.hostQuickbarExpanded);
+    setClipboardFeedback('Session UI reset to defaults.');
+  }, [setClipboardFeedback]);
+
   const guestRecoveryAction = useMemo(() => {
     if (socketStatus !== 'connected') {
       return {
@@ -5159,6 +5238,11 @@ export function OnlineSessionPage() {
             <button type="button" onClick={() => void refreshSessionSnapshot('manual')} disabled={refreshingSnapshot}>
               {refreshingSnapshot ? 'Refreshing…' : 'Refresh'}
             </button>
+            {UX_ONLINE_FLOW_V2_ENABLED ? (
+              <button type="button" onClick={onRecoverSessionUi}>
+                Recover Session UI
+              </button>
+            ) : null}
           </div>
         ) : null}
         {!advancedSessionTools ? (
@@ -5182,6 +5266,16 @@ export function OnlineSessionPage() {
             {advancedSessionTools && currentMemberInputMuted ? <span className="status-pill status-bad">Input muted</span> : null}
           </div>
           <div className="online-guest-quickbar-grid">
+            {UX_ONLINE_FLOW_V2_ENABLED ? (
+              <button
+                type="button"
+                className="online-recovery-button"
+                onClick={guestRecoveryAction.onClick}
+                disabled={guestRecoveryAction.disabled}
+              >
+                {guestRecoveryAction.label}
+              </button>
+            ) : null}
             <button type="button" onClick={() => setGuestFocusMode((value) => !value)} aria-pressed={guestFocusMode}>
               {guestFocusMode ? 'Disable Focus' : 'Enable Focus'}
             </button>
@@ -5209,14 +5303,9 @@ export function OnlineSessionPage() {
               <button type="button" onClick={() => setShowGuestInputDeck((value) => !value)} aria-pressed={showGuestInputDeck}>
                 {showGuestInputDeck ? 'Hide Input Deck' : 'Show Input Deck'}
               </button>
-              {guestRecoveryAction.key !== 'resync' ? (
-                <button
-                  type="button"
-                  className="online-recovery-button"
-                  onClick={guestRecoveryAction.onClick}
-                  disabled={guestRecoveryAction.disabled}
-                >
-                  {guestRecoveryAction.label}
+              {UX_ONLINE_FLOW_V2_ENABLED ? (
+                <button type="button" onClick={onRecoverSessionUi}>
+                  Recover Session UI
                 </button>
               ) : null}
             </div>

@@ -5,6 +5,7 @@ import { Link, NavLink, useNavigate, useParams, useSearchParams } from 'react-ro
 import { ControllerWizard } from '../components/ControllerWizard';
 import { InSessionSettingsModal } from '../components/InSessionSettingsModal';
 import { VirtualController } from '../components/VirtualController';
+import { UX_ONBOARDING_V2_ENABLED, UX_PLAY_NAV_V2_ENABLED, UX_PREF_SYNC_V1_ENABLED } from '../config/uxFlags';
 import {
   deleteSlotSaveEverywhere,
   persistRuntimeSaveForSlot,
@@ -50,6 +51,8 @@ import {
 } from '../storage/appSettings';
 import { useAppStore } from '../state/appStore';
 import { useAuthStore } from '../state/authStore';
+import { useOnboardingStore } from '../state/onboardingStore';
+import { usePreferencesStore } from '../state/preferencesStore';
 import type { ControllerProfile, N64ControlTarget } from '../types/input';
 import type {
   HostStreamQualityPresetHint,
@@ -75,6 +78,7 @@ const ONLINE_VIEWER_PRESSURE_AUTOSTABILIZE_REPEAT_MS = 42_000;
 const PLAY_VIEW_PREFERENCES_KEY = 'play_view_preferences_v1';
 const ONLINE_HOST_DIAGNOSTICS_PREFERENCES_KEY = 'online_host_diagnostics_prefs_v2';
 const ONLINE_HOST_ADVANCED_TOOLS_PREFERENCES_KEY = 'play_online_host_advanced_tools_v2';
+const PLAY_MENU_TAB_PREFERENCES_KEY = 'play_menu_active_tab_v1';
 const PLAY_HUD_AUTO_HIDE_DELAY_MS = 3_200;
 const SAVE_AUTOSYNC_INTERVAL_MS = 20_000;
 const PLAY_COMPACT_HUD_MAX_WIDTH = 980;
@@ -96,6 +100,7 @@ const ONLINE_VOICE_MEDIA_CONSTRAINTS: MediaStreamConstraints = {
 
 type SessionStatus = 'loading' | 'running' | 'paused' | 'error';
 type WizardMode = 'create' | 'edit';
+type PlayMenuTab = 'gameplay' | 'saves' | 'controls' | 'online';
 type HostStreamQualityPreset = 'adaptive' | 'ultra_low_latency' | 'balanced' | 'quality';
 type EffectiveHostStreamQualityPreset = Exclude<HostStreamQualityPreset, 'adaptive'>;
 type HostWebRtcSignalMessage = Extract<MultiplayerSocketMessage, { type: 'webrtc_signal' }>;
@@ -236,6 +241,32 @@ function savePlayViewPreferences(preferences: PlayViewPreferences): void {
     window.localStorage.setItem(PLAY_VIEW_PREFERENCES_KEY, JSON.stringify(preferences));
   } catch {
     // Ignore persistence failures (private mode, quota, etc.) without affecting gameplay.
+  }
+}
+
+function loadPlayMenuTabPreference(): PlayMenuTab {
+  if (typeof window === 'undefined') {
+    return 'gameplay';
+  }
+  try {
+    const raw = window.localStorage.getItem(PLAY_MENU_TAB_PREFERENCES_KEY);
+    if (raw === 'saves' || raw === 'controls' || raw === 'online' || raw === 'gameplay') {
+      return raw;
+    }
+  } catch {
+    // Ignore read failures and use default tab.
+  }
+  return 'gameplay';
+}
+
+function savePlayMenuTabPreference(tab: PlayMenuTab): void {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  try {
+    window.localStorage.setItem(PLAY_MENU_TAB_PREFERENCES_KEY, tab);
+  } catch {
+    // Ignore storage failures.
   }
 }
 
@@ -619,6 +650,10 @@ export function PlayPage() {
   const emulatorWarning = useAppStore((state) => state.emulatorWarning);
   const setEmulatorWarning = useAppStore((state) => state.setEmulatorWarning);
   const isAuthenticated = useAuthStore((state) => state.status === 'authenticated');
+  const markOnboardingStepComplete = useOnboardingStore((state) => state.markStepComplete);
+  const preferencesInitialized = usePreferencesStore((state) => state.initialized);
+  const syncedPlayPreferences = usePreferencesStore((state) => state.preferences.play);
+  const updatePlayPreferences = usePreferencesStore((state) => state.updatePlayPreferences);
 
   const decodedRomId = romId ? decodeURIComponent(romId) : undefined;
   const requestedSaveSlotId = (searchParams.get('saveSlot') ?? '').trim();
@@ -693,6 +728,7 @@ export function PlayPage() {
   });
   const onlineHostGameVolumeBeforeMuteRef = useRef(ONLINE_AUDIO_DEFAULT_GAME_VOLUME);
   const onlineHostChatVolumeBeforeMuteRef = useRef(ONLINE_AUDIO_DEFAULT_CHAT_VOLUME);
+  const appliedSyncedPlayPrefsRef = useRef(false);
 
   const [rom, setRom] = useState<RomRecord>();
   const [status, setStatus] = useState<SessionStatus>('loading');
@@ -704,6 +740,7 @@ export function PlayPage() {
   const [wizardTemplateProfile, setWizardTemplateProfile] = useState<ControllerProfile>();
   const [settingsModalOpen, setSettingsModalOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [activeMenuTab, setActiveMenuTab] = useState<PlayMenuTab>(() => loadPlayMenuTabPreference());
   const [hudHiddenByUser, setHudHiddenByUser] = useState(false);
   const [hudAutoHidden, setHudAutoHidden] = useState(false);
   const [autoHideHudWhileRunning, setAutoHideHudWhileRunning] = useState(
@@ -783,6 +820,92 @@ export function PlayPage() {
         : status === 'error'
           ? 'status-pill status-bad'
           : 'status-pill';
+  const saveSyncStatus: {
+    local: 'ready' | 'working' | 'issue';
+    cloud: 'ready' | 'working' | 'issue' | 'local-only';
+  } = useMemo(() => {
+    const message = (saveActivityMessage ?? '').toLowerCase();
+    const hasErrorSignal =
+      message.includes('failed')
+      || message.includes('unavailable')
+      || message.includes('could not');
+    const cloudStatus = !isAuthenticated
+      ? 'local-only'
+      : savingState
+        ? 'working'
+        : hasErrorSignal
+          ? 'issue'
+          : 'ready';
+    return {
+      local: savingState ? 'working' : hasErrorSignal ? 'issue' : 'ready',
+      cloud: cloudStatus,
+    };
+  }, [isAuthenticated, saveActivityMessage, savingState]);
+
+  useEffect(() => {
+    if (!UX_PLAY_NAV_V2_ENABLED) {
+      return;
+    }
+    savePlayMenuTabPreference(activeMenuTab);
+  }, [activeMenuTab]);
+
+  useEffect(() => {
+    if (!UX_PREF_SYNC_V1_ENABLED || !preferencesInitialized || appliedSyncedPlayPrefsRef.current) {
+      return;
+    }
+    appliedSyncedPlayPrefsRef.current = true;
+
+    if (typeof syncedPlayPreferences.autoHideHudWhileRunning === 'boolean') {
+      setAutoHideHudWhileRunning(syncedPlayPreferences.autoHideHudWhileRunning);
+    }
+    if (UX_PLAY_NAV_V2_ENABLED && syncedPlayPreferences.activeMenuTab) {
+      setActiveMenuTab(syncedPlayPreferences.activeMenuTab);
+    }
+    if (typeof syncedPlayPreferences.showOnlineAdvancedTools === 'boolean') {
+      setShowOnlineHostAdvancedTools(syncedPlayPreferences.showOnlineAdvancedTools);
+    }
+  }, [preferencesInitialized, syncedPlayPreferences]);
+
+  useEffect(() => {
+    if (!onlineRelayEnabled && activeMenuTab === 'online') {
+      setActiveMenuTab('gameplay');
+    }
+  }, [activeMenuTab, onlineRelayEnabled]);
+
+  useEffect(() => {
+    if (status === 'running') {
+      if (UX_ONBOARDING_V2_ENABLED) {
+        markOnboardingStepComplete('launch_game');
+      }
+    }
+  }, [markOnboardingStepComplete, status]);
+
+  useEffect(() => {
+    if (activeProfileId) {
+      if (UX_ONBOARDING_V2_ENABLED) {
+        markOnboardingStepComplete('verify_controls');
+      }
+    }
+  }, [activeProfileId, markOnboardingStepComplete]);
+
+  useEffect(() => {
+    if (!UX_PREF_SYNC_V1_ENABLED || !preferencesInitialized) {
+      return;
+    }
+    void updatePlayPreferences({
+      autoHideHudWhileRunning,
+      activeMenuTab,
+      showOnlineAdvancedTools: showOnlineHostAdvancedTools,
+    }).catch(() => {
+      // Preference sync is best-effort.
+    });
+  }, [
+    activeMenuTab,
+    autoHideHudWhileRunning,
+    preferencesInitialized,
+    showOnlineHostAdvancedTools,
+    updatePlayPreferences,
+  ]);
 
   useEffect(() => {
     onlineHostViewerTelemetryRef.current = onlineHostViewerTelemetry;
@@ -3740,6 +3863,10 @@ export function PlayPage() {
           ? 'Shortcuts: Space pause/resume • R reset • M map controller • O menu • H HUD • Y stabilize viewers • Esc close overlays.'
           : 'Shortcuts: Space pause/resume • R reset • M map controller • O menu • H HUD • Esc close overlays.';
   const activeProfileSummaryLabel = activeProfile?.name ?? 'None';
+  const gameplaySectionVisible = !UX_PLAY_NAV_V2_ENABLED || activeMenuTab === 'gameplay';
+  const savesSectionVisible = !UX_PLAY_NAV_V2_ENABLED || activeMenuTab === 'saves';
+  const controlsSectionVisible = !UX_PLAY_NAV_V2_ENABLED || activeMenuTab === 'controls';
+  const onlineSectionVisible = !UX_PLAY_NAV_V2_ENABLED || activeMenuTab === 'online';
 
   return (
     <section
@@ -3984,7 +4111,84 @@ export function PlayPage() {
           </button>
         </header>
 
-        <div className="play-side-section">
+        {UX_PLAY_NAV_V2_ENABLED ? (
+          <div className="play-menu-tabs" role="tablist" aria-label="Play menu sections">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeMenuTab === 'gameplay'}
+              className={activeMenuTab === 'gameplay' ? 'online-input-active' : undefined}
+              onClick={() => setActiveMenuTab('gameplay')}
+            >
+              Gameplay
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeMenuTab === 'saves'}
+              className={activeMenuTab === 'saves' ? 'online-input-active' : undefined}
+              onClick={() => setActiveMenuTab('saves')}
+            >
+              Saves
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeMenuTab === 'controls'}
+              className={activeMenuTab === 'controls' ? 'online-input-active' : undefined}
+              onClick={() => setActiveMenuTab('controls')}
+            >
+              Controls
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeMenuTab === 'online'}
+              className={activeMenuTab === 'online' ? 'online-input-active' : undefined}
+              onClick={() => setActiveMenuTab('online')}
+              disabled={!onlineRelayEnabled}
+            >
+              Online
+            </button>
+          </div>
+        ) : null}
+
+        {UX_PLAY_NAV_V2_ENABLED ? (
+          <div className="play-save-health-row" aria-label="Save health">
+            <span
+              className={`status-pill ${
+                saveSyncStatus.local === 'ready'
+                  ? 'status-good'
+                  : saveSyncStatus.local === 'working'
+                    ? 'status-warn'
+                    : 'status-bad'
+              }`}
+            >
+              Local: {saveSyncStatus.local === 'ready' ? 'Ready' : saveSyncStatus.local === 'working' ? 'Syncing' : 'Issue'}
+            </span>
+            <span
+              className={`status-pill ${
+                saveSyncStatus.cloud === 'ready'
+                  ? 'status-good'
+                  : saveSyncStatus.cloud === 'working' || saveSyncStatus.cloud === 'local-only'
+                    ? 'status-warn'
+                    : 'status-bad'
+              }`}
+            >
+              Cloud:{' '}
+              {saveSyncStatus.cloud === 'ready'
+                ? 'Synced'
+                : saveSyncStatus.cloud === 'working'
+                  ? 'Syncing'
+                  : saveSyncStatus.cloud === 'local-only'
+                    ? 'Local only'
+                    : 'Sync failed'}
+            </span>
+          </div>
+        ) : null}
+
+        {gameplaySectionVisible ? (
+          <div className="play-side-section">
           <p className="online-subtle">
             {onlineRelayEnabled
               ? 'Host-authoritative relay is active. This panel includes host diagnostics and session tools.'
@@ -4036,9 +4240,11 @@ export function PlayPage() {
             Auto-hide HUD while game is running
           </label>
           <p className="online-subtle">Immersive shortcut: press <code>H</code> to hide/show HUD instantly.</p>
-        </div>
+          </div>
+        ) : null}
 
-        <section className="play-side-section">
+        {savesSectionVisible ? (
+          <section className="play-side-section">
           <h3>Save Data</h3>
           <p className="online-subtle">
             Autosave is always on. Resuming this game uses the most recently active slot by default.
@@ -4114,9 +4320,10 @@ export function PlayPage() {
             onChange={(event) => void onImportSaveFile(event)}
             hidden
           />
-        </section>
+          </section>
+        ) : null}
 
-        {onlineRelayEnabled ? (
+        {onlineRelayEnabled && onlineSectionVisible ? (
           <section className="play-side-section">
             <h3>Online Status</h3>
             <div className="session-status-row">
@@ -4472,7 +4679,8 @@ export function PlayPage() {
           </section>
         ) : null}
 
-        <section className="play-side-section">
+        {controlsSectionVisible ? (
+          <section className="play-side-section">
           <h3>Controller Profiles</h3>
           {profiles.length === 0 ? <p>No profiles yet. Create one to map controls.</p> : null}
           {profiles.length > 0 ? (
@@ -4505,17 +4713,20 @@ export function PlayPage() {
               Active: {activeProfile.name} • Device {activeProfile.deviceId} • Deadzone {activeProfile.deadzone.toFixed(2)}
             </p>
           ) : null}
-        </section>
+          </section>
+        ) : null}
 
-        <section className="play-side-section">
+        {gameplaySectionVisible ? (
+          <section className="play-side-section">
           <h3>Emulator Runtime</h3>
           <p>Renderer: {backendLabel}</p>
           <p>Core: {coreLabel}</p>
           <p>Boot mode: {bootMode === 'auto' ? 'Auto fallback' : bootMode === 'local' ? 'Local cores only' : 'CDN cores only'}</p>
           <p>First launch can take a few seconds while emulator assets initialize.</p>
-        </section>
+          </section>
+        ) : null}
 
-        {status === 'error' ? (
+        {gameplaySectionVisible && status === 'error' ? (
           <section className="play-side-section">
             <h3>Recovery</h3>
             {isCatalogMissingError ? (

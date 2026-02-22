@@ -1,7 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ChangeEvent } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 
+import { OnboardingChecklistCard } from '../components/OnboardingChecklistCard';
+import { UX_ONBOARDING_V2_ENABLED, UX_ONLINE_FLOW_V2_ENABLED, UX_PREF_SYNC_V1_ENABLED } from '../config/uxFlags';
 import { createOnlineSession, getOnlineSession, joinOnlineSession } from '../online/multiplayerApi';
 import { buildInviteJoinUrl } from '../online/sessionLinks';
 import {
@@ -15,6 +17,9 @@ import {
 } from '../storage/appSettings';
 import { useAppStore } from '../state/appStore';
 import { useAuthStore } from '../state/authStore';
+import { useOnboardingStore } from '../state/onboardingStore';
+import { usePreferencesStore } from '../state/preferencesStore';
+import { useUiStore } from '../state/uiStore';
 
 const NO_ROM_SELECTED = '__none__';
 
@@ -127,6 +132,9 @@ export function OnlinePage() {
   const authUser = useAuthStore((state) => state.user);
   const uploadAccountAvatar = useAuthStore((state) => state.uploadAvatar);
   const clearAccountAvatar = useAuthStore((state) => state.clearAvatar);
+  const markOnboardingStepComplete = useOnboardingStore((state) => state.markStepComplete);
+  const addToast = useUiStore((state) => state.addToast);
+  const updateProfilePreferences = usePreferencesStore((state) => state.updateProfilePreferences);
 
   const [hostName, setHostName] = useState('Player 1');
   const [joinName, setJoinName] = useState('Player');
@@ -145,21 +153,47 @@ export function OnlinePage() {
   const [recentSessions, setRecentSessions] = useState<RecentOnlineSession[]>([]);
   const [loadingRecentSessions, setLoadingRecentSessions] = useState(true);
   const [recentSessionsWarning, setRecentSessionsWarning] = useState<string>();
-  const [recentSessionsInfo, setRecentSessionsInfo] = useState<string>();
   const [reopeningSessionKey, setReopeningSessionKey] = useState<string>();
   const [recentSearch, setRecentSearch] = useState('');
   const [recentRoleFilter, setRecentRoleFilter] = useState<'all' | 'host' | 'guest'>('all');
 
+  const completeOnboardingStep = useCallback((step: 'import_rom' | 'launch_game' | 'verify_controls' | 'online_session'): void => {
+    if (!UX_ONBOARDING_V2_ENABLED) {
+      return;
+    }
+    markOnboardingStepComplete(step);
+  }, [markOnboardingStepComplete]);
+
+  const syncProfilePreferences = useCallback(
+    (patch: { displayName?: string; avatarUrl?: string; country?: string }): void => {
+      if (!UX_PREF_SYNC_V1_ENABLED) {
+        return;
+      }
+      void updateProfilePreferences(patch).catch(() => {
+        // Preference sync is best-effort.
+      });
+    },
+    [updateProfilePreferences],
+  );
+
   const setTransientInfo = (message: string): void => {
-    setRecentSessionsInfo(message);
-    window.setTimeout(() => {
-      setRecentSessionsInfo((current) => (current === message ? undefined : current));
-    }, 2_200);
+    addToast({
+      tone: 'info',
+      message,
+      dedupeKey: 'online:transient',
+      autoDismissMs: 2_200,
+    });
   };
 
   useEffect(() => {
     void refreshRoms();
   }, [refreshRoms]);
+
+  useEffect(() => {
+    if (roms.length > 0) {
+      completeOnboardingStep('import_rom');
+    }
+  }, [completeOnboardingStep, roms.length]);
 
   useEffect(() => {
     let cancelled = false;
@@ -169,6 +203,11 @@ export function OnlinePage() {
         setIdentityAvatarUrl(authUser.avatarUrl ?? '');
         setHostName(authUser.username);
         setJoinName(authUser.username);
+        syncProfilePreferences({
+          displayName: authUser.username,
+          avatarUrl: authUser.avatarUrl ?? undefined,
+          country: authUser.country,
+        });
         return;
       }
 
@@ -181,6 +220,10 @@ export function OnlinePage() {
         setIdentityAvatarUrl(profile.avatarUrl ?? '');
         setHostName(profile.playerName);
         setJoinName(profile.playerName);
+        syncProfilePreferences({
+          displayName: profile.playerName,
+          avatarUrl: profile.avatarUrl,
+        });
       } catch (error) {
         if (!cancelled) {
           const message = error instanceof Error ? error.message : 'Online profile could not be loaded.';
@@ -193,7 +236,7 @@ export function OnlinePage() {
     return () => {
       cancelled = true;
     };
-  }, [authStatus, authUser]);
+  }, [authStatus, authUser, syncProfilePreferences]);
 
   useEffect(() => {
     let cancelled = false;
@@ -287,6 +330,41 @@ export function OnlinePage() {
     };
   }, [recentSessions]);
   const hasRecentFilters = recentSearch.trim().length > 0 || recentRoleFilter !== 'all';
+  const hostPreflightChecks = useMemo(
+    () => [
+      {
+        key: 'rom',
+        label: 'ROM selected',
+        ok: Boolean(selectedRom),
+        detail: selectedRom ? selectedRom.title : 'Pick a ROM now or choose later in Library.',
+      },
+      {
+        key: 'guests',
+        label: 'Guests connected',
+        ok: recentSummary.guestCount > 0,
+        detail:
+          recentSummary.guestCount > 0
+            ? `${recentSummary.guestCount} prior guest session${recentSummary.guestCount === 1 ? '' : 's'} remembered.`
+            : 'No recent guests yet. Share invite code after creating room.',
+      },
+      {
+        key: 'ready',
+        label: 'Ready check',
+        ok: recentSummary.total > 0,
+        detail:
+          recentSummary.total > 0
+            ? 'Ready-check controls are available in room host tools.'
+            : 'Create room first, then run ready check before launch.',
+      },
+      {
+        key: 'voice',
+        label: 'Voice',
+        ok: hostVoiceEnabled,
+        detail: hostVoiceEnabled ? 'Lobby voice enabled for new room.' : 'Voice disabled for new room.',
+      },
+    ],
+    [hostVoiceEnabled, recentSummary.guestCount, recentSummary.total, selectedRom],
+  );
 
   const onSaveIdentity = async (): Promise<void> => {
     if (authStatus === 'authenticated' && authUser) {
@@ -307,6 +385,10 @@ export function OnlinePage() {
       setIdentityAvatarUrl(avatarUrl ?? '');
       setHostName((current) => (current.trim().length === 0 || current === 'Player 1' || current === 'Player' ? normalizedName : current));
       setJoinName((current) => (current.trim().length === 0 || current === 'Player' || current === 'Player 1' ? normalizedName : current));
+      syncProfilePreferences({
+        displayName: normalizedName,
+        avatarUrl: avatarUrl,
+      });
       setTransientInfo('Profile saved.');
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Could not save online profile.';
@@ -344,6 +426,7 @@ export function OnlinePage() {
         const warning = rememberError instanceof Error ? rememberError.message : 'Could not save recent session locally.';
         setRecentSessionsWarning(warning);
       }
+      completeOnboardingStep('online_session');
       navigate(`/online/session/${created.code}?clientId=${encodeURIComponent(created.clientId)}`);
     } catch (sessionError) {
       const message = sessionError instanceof Error ? sessionError.message : 'Failed to create session.';
@@ -384,6 +467,7 @@ export function OnlinePage() {
         const warning = rememberError instanceof Error ? rememberError.message : 'Could not save recent session locally.';
         setRecentSessionsWarning(warning);
       }
+      completeOnboardingStep('online_session');
       navigate(`/online/session/${joined.code}?clientId=${encodeURIComponent(joined.clientId)}`);
     } catch (joinError) {
       const message = joinError instanceof Error ? joinError.message : 'Failed to join session.';
@@ -450,10 +534,16 @@ export function OnlinePage() {
       }
       if (authStatus === 'authenticated') {
         await uploadAccountAvatar(dataUrl);
+        syncProfilePreferences({
+          avatarUrl: dataUrl,
+        });
         setTransientInfo(`Uploaded avatar from ${file.name}.`);
         return;
       }
       setIdentityAvatarUrl(dataUrl);
+      syncProfilePreferences({
+        avatarUrl: dataUrl,
+      });
       setTransientInfo(`Loaded avatar from ${file.name}. Save profile to keep it.`);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Avatar could not be loaded.';
@@ -526,6 +616,7 @@ export function OnlinePage() {
           romId: session.romId,
           romTitle: session.romTitle,
         });
+        completeOnboardingStep('online_session');
         navigate(`/online/session/${session.code}?clientId=${encodeURIComponent(hostClientId)}`);
         return;
       }
@@ -541,6 +632,7 @@ export function OnlinePage() {
           romId: session.romId,
           romTitle: session.romTitle,
         });
+        completeOnboardingStep('online_session');
         navigate(`/online/session/${session.code}?clientId=${encodeURIComponent(entry.clientId)}`);
         return;
       }
@@ -561,6 +653,7 @@ export function OnlinePage() {
         romTitle: rejoined.session.romTitle,
       });
 
+      completeOnboardingStep('online_session');
       navigate(`/online/session/${rejoined.code}?clientId=${encodeURIComponent(rejoined.clientId)}`);
     } catch (reopenError) {
       const message = reopenError instanceof Error ? reopenError.message : 'Could not reopen this session.';
@@ -586,6 +679,7 @@ export function OnlinePage() {
             romTitle: fallbackRom?.title ?? entry.romTitle,
           });
           setTransientInfo('Previous host room expired. Started a fresh host session.');
+          completeOnboardingStep('online_session');
           navigate(`/online/session/${created.code}?clientId=${encodeURIComponent(created.clientId)}`);
           return;
         } catch (fallbackError) {
@@ -672,8 +766,55 @@ export function OnlinePage() {
         </div>
         {error ? <p className="error-text">{error}</p> : null}
         {recentSessionsWarning ? <p className="warning-text">{recentSessionsWarning}</p> : null}
-        {recentSessionsInfo ? <p className="online-subtle">{recentSessionsInfo}</p> : null}
       </header>
+
+      {UX_ONBOARDING_V2_ENABLED ? (
+        <OnboardingChecklistCard
+          actions={{
+            import_rom: {
+              label: 'Open Library',
+              to: '/',
+            },
+            launch_game: {
+              label: 'Play a Game',
+              to: selectedRom ? `/play/${selectedRom.id}` : '/',
+            },
+            verify_controls: {
+              label: 'Open Controls',
+              to: '/settings#settings-profiles',
+            },
+            online_session: {
+              label: 'Create or Join Now',
+              onClick: () => {
+                const startCard = document.getElementById('online-start-card');
+                startCard?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+              },
+            },
+          }}
+        />
+      ) : null}
+
+      {UX_ONLINE_FLOW_V2_ENABLED ? (
+        <section className="panel online-host-preflight-panel" aria-label="Host preflight checklist">
+          <div className="panel-header-inline">
+            <h2>Host Preflight</h2>
+            <span className="status-pill">
+              {hostPreflightChecks.filter((entry) => entry.ok).length}/{hostPreflightChecks.length} ready
+            </span>
+          </div>
+          <p className="online-subtle">Quick pass before you start a room to keep launch flow smooth.</p>
+          <ul className="online-host-preflight-list">
+            {hostPreflightChecks.map((entry) => (
+              <li key={entry.key}>
+                <span className={entry.ok ? 'status-pill status-good' : 'status-pill status-warn'}>
+                  {entry.label}: {entry.ok ? 'Ready' : 'Pending'}
+                </span>
+                <span className="online-subtle">{entry.detail}</span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
 
       <section id="online-profile-card" className="panel online-identity-panel">
         <div className="online-section-headline">
@@ -745,9 +886,15 @@ export function OnlinePage() {
                   const message = clearError instanceof Error ? clearError.message : 'Could not clear account avatar.';
                   setRecentSessionsWarning(message);
                 });
+                syncProfilePreferences({
+                  avatarUrl: undefined,
+                });
                 return;
               }
               setIdentityAvatarUrl('');
+              syncProfilePreferences({
+                avatarUrl: undefined,
+              });
             }}
             disabled={identitySaving || identityAvatarUrl.length === 0}
           >
@@ -982,7 +1129,12 @@ export function OnlinePage() {
             </label>
           </div>
         ) : null}
-        {loadingRecentSessions ? <p>Loading recent sessions…</p> : null}
+        {loadingRecentSessions ? (
+          <div className="online-recent-loading" aria-hidden="true">
+            <div className="skeleton-block" style={{ height: '2.4rem' }} />
+            <div className="skeleton-block" style={{ height: '2.4rem' }} />
+          </div>
+        ) : null}
         {!loadingRecentSessions && recentSessions.length === 0 ? (
           <p>No recent sessions yet. Start or join a game to populate this list.</p>
         ) : null}

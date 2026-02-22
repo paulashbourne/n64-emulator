@@ -51,6 +51,23 @@ body {
   line-height: 1.42;
 }
 
+.skip-link {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  z-index: 1000;
+  padding: 0.55rem 0.85rem;
+  border-radius: 0.55rem;
+  border: 1px solid rgba(255, 193, 87, 0.82);
+  background: rgba(12, 18, 30, 0.95);
+  color: var(--ink);
+}
+
+.skip-link:focus-visible {
+  left: 0.85rem;
+  top: 0.85rem;
+}
+
 body.play-no-scroll {
   overflow: hidden;
   overscroll-behavior: none;
@@ -191,6 +208,113 @@ label {
 
 .app-main-play {
   min-height: 100vh;
+}
+
+.notification-center {
+  position: fixed;
+  top: max(0.45rem, env(safe-area-inset-top));
+  right: max(0.55rem, env(safe-area-inset-right));
+  width: min(420px, calc(100vw - 1.2rem));
+  display: grid;
+  gap: 0.5rem;
+  z-index: 280;
+}
+
+.notification-card {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.6rem;
+  padding: 0.62rem 0.72rem;
+  border-radius: 0.78rem;
+  border: 1px solid var(--border);
+  background: rgba(8, 13, 25, 0.95);
+  box-shadow: 0 12px 26px rgba(1, 7, 19, 0.4);
+}
+
+.notification-card button {
+  padding: 0.35rem 0.58rem;
+  font-size: 0.82rem;
+}
+
+.notification-copy {
+  display: grid;
+  gap: 0.14rem;
+  min-width: 0;
+}
+
+.notification-title {
+  margin: 0;
+  font-weight: 700;
+}
+
+.notification-detail {
+  margin: 0;
+  color: var(--ink-muted);
+  word-break: break-word;
+}
+
+.notification-info {
+  border-color: rgba(126, 173, 255, 0.46);
+}
+
+.notification-success {
+  border-color: rgba(52, 199, 89, 0.46);
+}
+
+.notification-warning {
+  border-color: rgba(255, 190, 99, 0.5);
+}
+
+.notification-error {
+  border-color: rgba(255, 109, 127, 0.52);
+}
+
+.onboarding-checklist {
+  margin-top: 0.6rem;
+}
+
+.onboarding-checklist-steps {
+  list-style: none;
+  margin: 0.8rem 0;
+  padding: 0;
+  display: grid;
+  gap: 0.55rem;
+}
+
+.onboarding-step {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.7rem;
+  padding: 0.62rem 0.72rem;
+  border-radius: 0.76rem;
+  border: 1px solid var(--border-soft);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.onboarding-step.done {
+  border-color: rgba(52, 199, 89, 0.36);
+}
+
+.onboarding-step-copy p {
+  margin: 0;
+}
+
+.skeleton-block {
+  border-radius: 0.68rem;
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.11), rgba(255, 255, 255, 0.05));
+  background-size: 220% 100%;
+  animation: skeleton-wave 1.2s ease infinite;
+}
+
+@keyframes skeleton-wave {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -40% 0;
+  }
 }
 
 .app-header {
@@ -4877,6 +5001,111 @@ label {
     flex: 1 1 calc(50% - 0.25rem);
     text-align: center;
   }
+}
+
+.library-loading-skeletons,
+.online-recent-loading {
+  display: grid;
+  gap: 0.5rem;
+  margin: 0.8rem 0;
+}
+
+.library-bulk-actions {
+  display: grid;
+  gap: 0.5rem;
+  margin-top: 0.6rem;
+}
+
+.library-rail-panel {
+  display: grid;
+  gap: 0.6rem;
+}
+
+.library-rail-list {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.library-rail-item {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.65rem;
+  padding: 0.58rem 0.68rem;
+  border-radius: 0.7rem;
+  border: 1px solid var(--border-soft);
+  background: rgba(255, 255, 255, 0.03);
+  color: inherit;
+  text-decoration: none;
+}
+
+.library-rail-item:hover {
+  border-color: rgba(138, 197, 255, 0.46);
+  text-decoration: none;
+}
+
+.library-row-selector {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 86px;
+  padding-top: 0.15rem;
+}
+
+.library-row-selector span {
+  color: var(--ink-muted);
+  font-size: 0.82rem;
+}
+
+.rom-card-selected {
+  border-color: rgba(138, 197, 255, 0.68);
+  box-shadow: 0 0 0 1px rgba(138, 197, 255, 0.28), var(--shadow);
+}
+
+.online-host-preflight-panel {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.online-host-preflight-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.45rem;
+}
+
+.online-host-preflight-list li {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.65rem;
+  padding: 0.55rem 0.66rem;
+  border: 1px solid var(--border-soft);
+  border-radius: 0.68rem;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.play-menu-tabs {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.42rem;
+  margin-bottom: 0.6rem;
+}
+
+.play-menu-tabs button {
+  width: 100%;
+}
+
+.play-save-health-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin-bottom: 0.66rem;
+}
+
+.settings-onboarding-actions {
+  margin-top: 0.5rem;
 }
 
 @media (max-width: 460px) {
