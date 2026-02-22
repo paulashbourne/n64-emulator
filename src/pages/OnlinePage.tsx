@@ -296,6 +296,7 @@ export function OnlinePage() {
   );
   const normalizedJoinCode = useMemo(() => extractInviteCodeInput(joinCodeInput), [joinCodeInput]);
   const inviteLinkDetected = inviteCodeFromLink.length === 6;
+  const inviteAuthDecisionPending = inviteLinkDetected && authStatus === 'loading';
   const showInviteAuthGate = inviteLinkDetected && authStatus === 'guest' && !inviteGuestContinueSelected;
   const requireGuestInviteName = inviteLinkDetected && authStatus === 'guest' && inviteGuestContinueSelected;
   const inviteLoginRedirectPath = inviteLinkDetected ? `/online?code=${encodeURIComponent(inviteCodeFromLink)}` : '/online';
@@ -303,6 +304,7 @@ export function OnlinePage() {
     !joining
     && !creating
     && normalizedJoinCode.length === 6
+    && !inviteAuthDecisionPending
     && !showInviteAuthGate
     && (!requireGuestInviteName || joinName.trim().length > 0);
   const joinCodeFeedback = useMemo(() => {
@@ -1143,6 +1145,9 @@ export function OnlinePage() {
             </div>
             <div className="online-join-hint">
               <span className={joinCodeFeedback.tone}>{joinCodeFeedback.text}</span>
+              {inviteAuthDecisionPending ? (
+                <span className="status-pill">Checking account session…</span>
+              ) : null}
               {requireGuestInviteName && joinName.trim().length === 0 ? (
                 <span className="status-pill status-warn">Enter a display name to continue as guest.</span>
               ) : null}
