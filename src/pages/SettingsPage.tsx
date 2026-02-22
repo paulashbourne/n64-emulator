@@ -4,6 +4,11 @@ import { ControllerWizard } from '../components/ControllerWizard';
 import { UX_ONBOARDING_V2_ENABLED } from '../config/uxFlags';
 import type { EmulatorBootMode } from '../emulator/emulatorJsRuntime';
 import {
+  DEFAULT_KEYBOARD_PROFILE_ID,
+  PRECONFIGURED_GAMEPAD_PROFILE_TEMPLATES,
+  createPreconfiguredGamepadProfileTemplate,
+} from '../input/controllerProfilePresets';
+import {
   getAdvancedSaveSlotsEnabled,
   getPreferredBootMode,
   setAdvancedSaveSlotsEnabled,
@@ -15,7 +20,6 @@ import { useOnboardingStore } from '../state/onboardingStore';
 import { useUiStore } from '../state/uiStore';
 import type { ControllerProfile } from '../types/input';
 
-const DEFAULT_KEYBOARD_PROFILE_ID = 'profile:keyboard-default';
 type WizardMode = 'create' | 'edit';
 type ProfileScopeFilter = 'all' | 'global' | 'rom';
 type SettingsSectionKey = 'profiles' | 'boot' | 'save' | 'danger';
@@ -258,6 +262,7 @@ export function SettingsPage() {
   const [wizardOpen, setWizardOpen] = useState(false);
   const [wizardMode, setWizardMode] = useState<WizardMode>('create');
   const [wizardTemplateProfile, setWizardTemplateProfile] = useState<ControllerProfile>();
+  const [createProfileTemplateId, setCreateProfileTemplateId] = useState<string>('');
   const [sectionVisibility, setSectionVisibility] = useState<SettingsSectionVisibilityState>(initialSectionVisibility);
   const [isCompactViewport, setIsCompactViewport] = useState(() => {
     if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
@@ -622,7 +627,9 @@ export function SettingsPage() {
 
   const openCreateWizard = (): void => {
     setWizardMode('create');
-    setWizardTemplateProfile(undefined);
+    setWizardTemplateProfile(
+      createProfileTemplateId ? createPreconfiguredGamepadProfileTemplate(createProfileTemplateId) : undefined,
+    );
     setWizardOpen(true);
   };
 
@@ -855,6 +862,24 @@ export function SettingsPage() {
                 {showAdvancedProfileTools ? 'Hide Advanced Tools' : 'Show Advanced Tools'}
               </button>
             </div>
+            <label>
+              New profile template
+              <select
+                value={createProfileTemplateId}
+                onChange={(event) => setCreateProfileTemplateId(event.target.value)}
+                disabled={working}
+              >
+                <option value="">Blank mapping (manual wizard)</option>
+                {PRECONFIGURED_GAMEPAD_PROFILE_TEMPLATES.map((template) => (
+                  <option key={template.templateId} value={template.templateId}>
+                    {template.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <p className="settings-shortcuts-hint">
+              Optional: pre-fill known gamepad mappings before stepping through the wizard.
+            </p>
             {showAdvancedProfileTools ? (
               <div className="settings-advanced-tools">
                 <p>Import and export profile JSON bundles for backup or transfer.</p>

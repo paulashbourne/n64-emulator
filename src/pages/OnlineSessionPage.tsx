@@ -5,6 +5,10 @@ import { ControllerWizard } from '../components/ControllerWizard';
 import { InSessionSettingsModal } from '../components/InSessionSettingsModal';
 import { VirtualController } from '../components/VirtualController';
 import { UX_ONBOARDING_V2_ENABLED, UX_ONLINE_FLOW_V2_ENABLED, UX_PREF_SYNC_V1_ENABLED } from '../config/uxFlags';
+import {
+  PRECONFIGURED_GAMEPAD_PROFILE_TEMPLATES,
+  createPreconfiguredGamepadProfileTemplate,
+} from '../input/controllerProfilePresets';
 import { closeOnlineSession, getOnlineSession, kickOnlineMember, multiplayerSocketUrl } from '../online/multiplayerApi';
 import { buildAnalogInputPayload, buildDigitalInputPayload } from '../online/joinerInput';
 import { describeRemoteInputPayload, parseRemoteInputPayload } from '../online/remoteInputBridge';
@@ -829,6 +833,7 @@ export function OnlineSessionPage() {
   const [wizardOpen, setWizardOpen] = useState(false);
   const [wizardMode, setWizardMode] = useState<WizardMode>('create');
   const [wizardTemplateProfile, setWizardTemplateProfile] = useState<ControllerProfile>();
+  const [createProfileTemplateId, setCreateProfileTemplateId] = useState<string>('');
   const [settingsModalOpen, setSettingsModalOpen] = useState(false);
   const [enforceReadyBeforeLaunch, setEnforceReadyBeforeLaunch] = useState(false);
   const [autoLaunchWhenReady, setAutoLaunchWhenReady] = useState(false);
@@ -4714,7 +4719,9 @@ export function OnlineSessionPage() {
 
   const openCreateWizard = (): void => {
     setWizardMode('create');
-    setWizardTemplateProfile(undefined);
+    setWizardTemplateProfile(
+      createProfileTemplateId ? createPreconfiguredGamepadProfileTemplate(createProfileTemplateId) : undefined,
+    );
     setWizardOpen(true);
   };
 
@@ -5812,6 +5819,17 @@ export function OnlineSessionPage() {
               ) : (
                 <p className="online-subtle">No controller profiles yet.</p>
               )}
+              <label>
+                New profile template
+                <select value={createProfileTemplateId} onChange={(event) => setCreateProfileTemplateId(event.target.value)}>
+                  <option value="">Blank mapping (manual wizard)</option>
+                  {PRECONFIGURED_GAMEPAD_PROFILE_TEMPLATES.map((template) => (
+                    <option key={template.templateId} value={template.templateId}>
+                      {template.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
               <div className="wizard-actions">
                 <button type="button" onClick={openCreateWizard}>
                   New Profile

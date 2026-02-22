@@ -31,6 +31,10 @@ import {
   stopEmulatorJs,
   type EmulatorBootMode,
 } from '../emulator/emulatorJsRuntime';
+import {
+  PRECONFIGURED_GAMEPAD_PROFILE_TEMPLATES,
+  createPreconfiguredGamepadProfileTemplate,
+} from '../input/controllerProfilePresets';
 import { N64_ANALOG_MAX_VALUE, N64_TARGET_TO_INPUT_INDEX } from '../emulator/n64InputMap';
 import { resolveEmulatorSimulateInput } from '../emulator/simulateInput';
 import { multiplayerSocketUrl } from '../online/multiplayerApi';
@@ -738,6 +742,7 @@ export function PlayPage() {
   const [wizardOpen, setWizardOpen] = useState(false);
   const [wizardMode, setWizardMode] = useState<WizardMode>('create');
   const [wizardTemplateProfile, setWizardTemplateProfile] = useState<ControllerProfile>();
+  const [createProfileTemplateId, setCreateProfileTemplateId] = useState<string>('');
   const [settingsModalOpen, setSettingsModalOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [activeMenuTab, setActiveMenuTab] = useState<PlayMenuTab>(() => loadPlayMenuTabPreference());
@@ -3510,7 +3515,9 @@ export function PlayPage() {
 
   const openCreateWizard = (): void => {
     setWizardMode('create');
-    setWizardTemplateProfile(undefined);
+    setWizardTemplateProfile(
+      createProfileTemplateId ? createPreconfiguredGamepadProfileTemplate(createProfileTemplateId) : undefined,
+    );
     setWizardOpen(true);
     setMenuOpen(true);
   };
@@ -4697,6 +4704,17 @@ export function PlayPage() {
               </select>
             </label>
           ) : null}
+          <label>
+            New profile template
+            <select value={createProfileTemplateId} onChange={(event) => setCreateProfileTemplateId(event.target.value)}>
+              <option value="">Blank mapping (manual wizard)</option>
+              {PRECONFIGURED_GAMEPAD_PROFILE_TEMPLATES.map((template) => (
+                <option key={template.templateId} value={template.templateId}>
+                  {template.name}
+                </option>
+              ))}
+            </select>
+          </label>
           <div className="wizard-actions">
             <button type="button" onClick={openCreateWizard}>
               New Profile

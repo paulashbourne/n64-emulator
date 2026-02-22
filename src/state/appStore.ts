@@ -1,6 +1,12 @@
 import { create } from 'zustand';
 
-import { createKeyboardPresetBindings } from '../input/mappingWizard';
+import {
+  DEFAULT_KEYBOARD_PROFILE_ID,
+  PRECONFIGURED_8BITDO_PROFILE_TEMPLATE_ID,
+  createKeyboardDefaultProfile,
+  createPreconfiguredGamepadProfileTemplate,
+  isLegacy8BitDoPreset,
+} from '../input/controllerProfilePresets';
 import {
   getPreferredFavoritesOnly,
   getPreferredLibrarySortMode,
@@ -21,106 +27,6 @@ import {
   supportsDirectoryPicker,
   type RomSortMode,
 } from '../roms/catalogService';
-import type { InputBinding, N64ControlTarget } from '../types/input';
-
-const DEFAULT_KEYBOARD_PROFILE_ID = 'profile:keyboard-default';
-const DEFAULT_SWITCH_PROFILE_ID = 'profile:gamepad-switch';
-const DEFAULT_XBOX_PROFILE_ID = 'profile:gamepad-xbox-series';
-const DEFAULT_BACKBONE_PROFILE_ID = 'profile:gamepad-backbone';
-const DEFAULT_8BITDO_PROFILE_ID = 'profile:gamepad-8bitdo-64';
-
-type FaceLayout = 'xbox' | 'nintendo';
-
-function button(index: number): InputBinding {
-  return {
-    source: 'gamepad_button',
-    index,
-  };
-}
-
-function axis(index: number, direction: 'negative' | 'positive', threshold = 0.3): InputBinding {
-  return {
-    source: 'gamepad_axis',
-    index,
-    direction,
-    threshold,
-  };
-}
-
-function axisDiscrete(index: number, axisValue: number, axisTolerance = 0.12): InputBinding {
-  return {
-    source: 'gamepad_axis',
-    index,
-    axisValue,
-    axisTolerance,
-  };
-}
-
-function createGamepadPresetBindings(layout: FaceLayout): Partial<Record<N64ControlTarget, InputBinding>> {
-  const aFaceIndex = layout === 'nintendo' ? 1 : 0;
-  const bFaceIndex = layout === 'nintendo' ? 0 : 1;
-
-  return {
-    a: button(aFaceIndex),
-    b: button(bFaceIndex),
-    z: button(6),
-    start: button(9),
-    l: button(4),
-    r: button(5),
-    dpad_up: button(12),
-    dpad_down: button(13),
-    dpad_left: button(14),
-    dpad_right: button(15),
-    c_up: axis(3, 'negative', 0.45),
-    c_down: axis(3, 'positive', 0.45),
-    c_left: axis(2, 'negative', 0.45),
-    c_right: axis(2, 'positive', 0.45),
-    analog_left: axis(0, 'negative', 0.2),
-    analog_right: axis(0, 'positive', 0.2),
-    analog_up: axis(1, 'negative', 0.2),
-    analog_down: axis(1, 'positive', 0.2),
-  };
-}
-
-function create8BitDo64PresetBindings(): Partial<Record<N64ControlTarget, InputBinding>> {
-  return {
-    a: button(0),
-    b: button(1),
-    z: button(8),
-    start: button(11),
-    l: button(6),
-    r: button(7),
-    // 8BitDo 64 exposes D-pad on a hat-style axis (axis 9) with discrete values.
-    dpad_up: axisDiscrete(9, -1),
-    dpad_down: axisDiscrete(9, 1 / 7),
-    dpad_left: axisDiscrete(9, 5 / 7),
-    dpad_right: axisDiscrete(9, -3 / 7),
-    c_up: axis(5, 'negative', 0.4),
-    c_down: axis(5, 'positive', 0.4),
-    c_left: axis(2, 'negative', 0.4),
-    c_right: axis(2, 'positive', 0.4),
-    analog_left: axis(0, 'negative', 0.2),
-    analog_right: axis(0, 'positive', 0.2),
-    analog_up: axis(1, 'negative', 0.2),
-    analog_down: axis(1, 'positive', 0.2),
-  };
-}
-
-function isLegacy8BitDoPreset(profile: ControllerProfile): boolean {
-  if (profile.profileId !== DEFAULT_8BITDO_PROFILE_ID) {
-    return false;
-  }
-
-  const startBinding = profile.bindings.start;
-  const dpadUpBinding = profile.bindings.dpad_up;
-
-  return (
-    startBinding?.source === 'gamepad_button'
-    && startBinding.index === 9
-    && dpadUpBinding?.source === 'gamepad_button'
-    && dpadUpBinding.index === 12
-  );
-}
 
 interface AppStoreState {
   roms: RomRecord[];
@@ -159,80 +65,32 @@ async function ensureDefaultKeyboardProfile(): Promise<void> {
     return;
   }
 
-  await db.profiles.put({
-    profileId: DEFAULT_KEYBOARD_PROFILE_ID,
-    name: 'Keyboard Default',
-    deviceId: 'keyboard-default',
-    deadzone: 0.2,
-    bindings: createKeyboardPresetBindings(),
-    updatedAt: Date.now(),
-  });
+  await db.profiles.put(createKeyboardDefaultProfile());
 }
 
-async function ensureDefaultGamepadProfiles(): Promise<void> {
-  const now = Date.now();
-  const templates: ControllerProfile[] = [
-    {
-      profileId: DEFAULT_SWITCH_PROFILE_ID,
-      name: 'Nintendo Switch Controller',
-      deviceId: 'preset-switch-controller',
-      deadzone: 0.2,
-      bindings: createGamepadPresetBindings('nintendo'),
-      updatedAt: now,
-    },
-    {
-      profileId: DEFAULT_XBOX_PROFILE_ID,
-      name: 'Xbox Series X|S Controller',
-      deviceId: 'preset-xbox-series-controller',
-      deadzone: 0.2,
-      bindings: createGamepadPresetBindings('xbox'),
-      updatedAt: now,
-    },
-    {
-      profileId: DEFAULT_BACKBONE_PROFILE_ID,
-      name: 'Backbone Controller (iPhone)',
-      deviceId: 'preset-backbone-controller',
-      deadzone: 0.2,
-      bindings: createGamepadPresetBindings('xbox'),
-      updatedAt: now,
-    },
-    {
-      profileId: DEFAULT_8BITDO_PROFILE_ID,
-      name: '8BitDo 64 Bluetooth Controller',
-      deviceId: 'preset-8bitdo-64-controller',
-      deadzone: 0.2,
-      bindings: create8BitDo64PresetBindings(),
-      updatedAt: now,
-    },
-  ];
-
-  const allProfiles = await db.profiles.toArray();
-  const existingById = new Map(allProfiles.map((profile) => [profile.profileId, profile]));
-  const missingProfiles: ControllerProfile[] = [];
-  const upgradedProfiles: ControllerProfile[] = [];
-
-  for (const template of templates) {
-    const existing = existingById.get(template.profileId);
-    if (!existing) {
-      missingProfiles.push(template);
-      continue;
-    }
-
-    if (template.profileId === DEFAULT_8BITDO_PROFILE_ID && isLegacy8BitDoPreset(existing)) {
-      upgradedProfiles.push({
-        ...existing,
-        name: template.name,
-        deviceId: template.deviceId,
-        deadzone: template.deadzone,
-        bindings: template.bindings,
-        updatedAt: Math.max(now, existing.updatedAt + 1),
-      });
-    }
+async function upgradeLegacyPresetProfiles(): Promise<void> {
+  const existing8BitDo = await db.profiles.get(PRECONFIGURED_8BITDO_PROFILE_TEMPLATE_ID);
+  if (!existing8BitDo || !isLegacy8BitDoPreset(existing8BitDo)) {
+    return;
   }
 
-  if (missingProfiles.length > 0 || upgradedProfiles.length > 0) {
-    await db.profiles.bulkPut([...missingProfiles, ...upgradedProfiles]);
+  const upgradedTemplate = createPreconfiguredGamepadProfileTemplate(
+    PRECONFIGURED_8BITDO_PROFILE_TEMPLATE_ID,
+    Math.max(Date.now(), existing8BitDo.updatedAt + 1),
+  );
+
+  if (!upgradedTemplate) {
+    return;
   }
+
+  await db.profiles.put({
+    ...existing8BitDo,
+    name: upgradedTemplate.name,
+    deviceId: upgradedTemplate.deviceId,
+    deadzone: upgradedTemplate.deadzone,
+    bindings: upgradedTemplate.bindings,
+    updatedAt: upgradedTemplate.updatedAt,
+  });
 }
 
 function normalizeGlobalProfile(profile: ControllerProfile): ControllerProfile {
@@ -434,7 +292,7 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
 
   loadProfiles: async (romHash?: string) => {
     await ensureDefaultKeyboardProfile();
-    await ensureDefaultGamepadProfiles();
+    await upgradeLegacyPresetProfiles();
     await migrateScopedProfilesToGlobal();
     const profiles = await queryProfiles(romHash);
     const activeProfileId = get().activeProfileId;

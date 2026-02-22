@@ -1,16 +1,14 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
+import {
+  DEFAULT_KEYBOARD_PROFILE_ID,
+  PRECONFIGURED_8BITDO_PROFILE_TEMPLATE_ID,
+  PRECONFIGURED_GAMEPAD_PROFILE_TEMPLATES,
+} from '../input/controllerProfilePresets';
 import { db } from '../storage/db';
 import { useAppStore } from './appStore';
 
-const DEFAULT_KEYBOARD_PROFILE_ID = 'profile:keyboard-default';
-const BUILT_IN_PROFILE_IDS = [
-  DEFAULT_KEYBOARD_PROFILE_ID,
-  'profile:gamepad-switch',
-  'profile:gamepad-xbox-series',
-  'profile:gamepad-backbone',
-  'profile:gamepad-8bitdo-64',
-];
+const PRECONFIGURED_GAMEPAD_TEMPLATE_IDS = PRECONFIGURED_GAMEPAD_PROFILE_TEMPLATES.map((template) => template.templateId);
 
 describe('app store profile defaults', () => {
   beforeEach(async () => {
@@ -47,15 +45,13 @@ describe('app store profile defaults', () => {
     vi.unstubAllGlobals();
   });
 
-  test('seeds built-in controller profiles when loading profiles', async () => {
+  test('seeds only keyboard default profile when loading profiles', async () => {
     await useAppStore.getState().loadProfiles();
 
     const profiles = useAppStore.getState().profiles;
     const profileIds = profiles.map((profile) => profile.profileId);
-    expect(profiles).toHaveLength(BUILT_IN_PROFILE_IDS.length);
-    for (const builtInId of BUILT_IN_PROFILE_IDS) {
-      expect(profileIds).toContain(builtInId);
-    }
+    expect(profiles).toHaveLength(1);
+    expect(profileIds).toContain(DEFAULT_KEYBOARD_PROFILE_ID);
     expect(useAppStore.getState().activeProfileId).toBe(DEFAULT_KEYBOARD_PROFILE_ID);
   });
 
@@ -76,47 +72,27 @@ describe('app store profile defaults', () => {
     expect(profileIds).toContain('profile:rom-only');
   });
 
-  test('seeds controller-specific face-button mappings for switch and xbox presets', async () => {
+  test('does not auto-seed preconfigured gamepad templates when loading profiles', async () => {
     await useAppStore.getState().loadProfiles();
-    const profiles = useAppStore.getState().profiles;
+    const profileIds = useAppStore.getState().profiles.map((profile) => profile.profileId);
 
-    const switchProfile = profiles.find((profile) => profile.profileId === 'profile:gamepad-switch');
-    const xboxProfile = profiles.find((profile) => profile.profileId === 'profile:gamepad-xbox-series');
-    const bitdoProfile = profiles.find((profile) => profile.profileId === 'profile:gamepad-8bitdo-64');
-
-    expect(switchProfile?.bindings.a?.source).toBe('gamepad_button');
-    expect(switchProfile?.bindings.a?.index).toBe(1);
-    expect(switchProfile?.bindings.b?.index).toBe(0);
-    expect(switchProfile?.bindings.c_up?.source).toBe('gamepad_axis');
-    expect(switchProfile?.bindings.c_up?.index).toBe(3);
-
-    expect(xboxProfile?.bindings.a?.source).toBe('gamepad_button');
-    expect(xboxProfile?.bindings.a?.index).toBe(0);
-    expect(xboxProfile?.bindings.b?.index).toBe(1);
-
-    expect(bitdoProfile?.bindings.z?.source).toBe('gamepad_button');
-    expect(bitdoProfile?.bindings.z?.index).toBe(8);
-    expect(bitdoProfile?.bindings.start?.index).toBe(11);
-    expect(bitdoProfile?.bindings.dpad_up?.source).toBe('gamepad_axis');
-    expect(bitdoProfile?.bindings.dpad_up?.index).toBe(9);
-    expect(bitdoProfile?.bindings.dpad_up?.axisValue).toBe(-1);
-    expect(bitdoProfile?.bindings.dpad_right?.axisValue).toBeCloseTo(-3 / 7, 6);
+    for (const templateId of PRECONFIGURED_GAMEPAD_TEMPLATE_IDS) {
+      expect(profileIds).not.toContain(templateId);
+    }
   });
 
-  test('built-in profiles are not duplicated across loads', async () => {
+  test('default keyboard profile is not duplicated across loads', async () => {
     await useAppStore.getState().loadProfiles();
     await useAppStore.getState().loadProfiles();
 
     const allProfiles = await db.profiles.toArray();
-    for (const builtInId of BUILT_IN_PROFILE_IDS) {
-      const defaults = allProfiles.filter((profile) => profile.profileId === builtInId);
-      expect(defaults).toHaveLength(1);
-    }
+    const defaults = allProfiles.filter((profile) => profile.profileId === DEFAULT_KEYBOARD_PROFILE_ID);
+    expect(defaults).toHaveLength(1);
   });
 
   test('upgrades legacy 8BitDo default profile mapping to hat-axis d-pad defaults', async () => {
     await db.profiles.put({
-      profileId: 'profile:gamepad-8bitdo-64',
+      profileId: PRECONFIGURED_8BITDO_PROFILE_TEMPLATE_ID,
       name: '8BitDo 64 Bluetooth Controller',
       deviceId: 'preset-8bitdo-64-controller',
       deadzone: 0.2,
@@ -136,7 +112,9 @@ describe('app store profile defaults', () => {
     });
 
     await useAppStore.getState().loadProfiles();
-    const upgraded = useAppStore.getState().profiles.find((profile) => profile.profileId === 'profile:gamepad-8bitdo-64');
+    const upgraded = useAppStore
+      .getState()
+      .profiles.find((profile) => profile.profileId === PRECONFIGURED_8BITDO_PROFILE_TEMPLATE_ID);
 
     expect(upgraded?.bindings.start?.index).toBe(11);
     expect(upgraded?.bindings.z?.index).toBe(8);
