@@ -1221,6 +1221,12 @@ httpServer.on('upgrade', (req, socket, head) => {
     return;
   }
 
+  try {
+    socket.setNoDelay(true);
+  } catch {
+    // Keep upgrade flow running on platforms where noDelay is unavailable.
+  }
+
   const code = (requestUrl.searchParams.get('code') ?? '').toUpperCase();
   const clientId = requestUrl.searchParams.get('clientId') ?? '';
   const session = sessions.get(code);

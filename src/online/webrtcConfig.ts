@@ -63,4 +63,7 @@ function parseIceServersFromEnv(rawValue: string | undefined): RTCIceServer[] | 
 export const WEBRTC_CONFIGURATION: RTCConfiguration = {
   iceServers: parseIceServersFromEnv(import.meta.env.VITE_MULTIPLAYER_ICE_SERVERS as string | undefined) ??
     DEFAULT_ICE_SERVERS,
+  bundlePolicy: 'max-bundle',
+  rtcpMuxPolicy: 'require',
+  iceCandidatePoolSize: 2,
 };

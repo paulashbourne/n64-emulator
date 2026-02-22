@@ -41,6 +41,11 @@ const GUEST_STALL_PROBE_INTERVAL_MS = 1_000;
 const GUEST_STALL_NO_PROGRESS_MS = 3_200;
 const GUEST_STALL_RECOVERY_COOLDOWN_MS = 8_000;
 const GUEST_STALL_WARMUP_GRACE_MS = 4_500;
+const GUEST_VIDEO_JITTER_TARGET_DEFAULT_MS = 22;
+const GUEST_VIDEO_JITTER_TARGET_RECOVERY_MS = 34;
+const GUEST_PLAYBACK_CATCH_UP_RATE = 1.04;
+const GUEST_PLAYBACK_CATCH_UP_MIN_BUFFER_MS = 110;
+const GUEST_PLAYBACK_CATCH_UP_MAX_BUFFER_MS = 900;
 const READY_AUTO_LAUNCH_COUNTDOWN_SECONDS = 3;
 const REMOTE_ANALOG_ZERO_THRESHOLD = 0.015;
 const REMOTE_ANALOG_LOG_COALESCE_MS = 220;
@@ -127,6 +132,7 @@ interface GuestStreamTelemetry {
   fps?: number;
   jitterMs?: number;
   rttMs?: number;
+  bufferDelayMs?: number;
 }
 
 interface GuestInputRelayProfile {
@@ -178,24 +184,24 @@ const HOST_STREAM_PRESET_LABELS: Record<HostStreamQualityPresetHint, string> = {
 const GUEST_INPUT_RELAY_PROFILES: Record<EffectiveGuestInputRelayMode, GuestInputRelayProfile> = {
   responsive: {
     label: 'Responsive',
-    description: 'Lowest controller delay. Best on strong Wi-Fi/Ethernet.',
-    sendIntervalMs: 24,
-    idleHeartbeatMs: 90,
-    deltaThreshold: 0.03,
+    description: 'Lowest controller delay. Best on stronger Wi-Fi/Ethernet links.',
+    sendIntervalMs: 16,
+    idleHeartbeatMs: 72,
+    deltaThreshold: 0.026,
   },
   balanced: {
     label: 'Balanced',
-    description: 'Steady control with moderate bandwidth usage.',
-    sendIntervalMs: 33,
-    idleHeartbeatMs: 140,
-    deltaThreshold: 0.04,
+    description: 'Latency-first default with moderate network pressure.',
+    sendIntervalMs: 24,
+    idleHeartbeatMs: 110,
+    deltaThreshold: 0.034,
   },
   conservative: {
     label: 'Conservative',
-    description: 'Reduces network pressure for unstable links.',
-    sendIntervalMs: 50,
-    idleHeartbeatMs: 210,
-    deltaThreshold: 0.06,
+    description: 'Reduces network pressure on unstable links while keeping control cadence usable.',
+    sendIntervalMs: 34,
+    idleHeartbeatMs: 165,
+    deltaThreshold: 0.05,
   },
 };
 
@@ -712,7 +718,9 @@ export function OnlineSessionPage() {
   const guestVoiceLocalStreamRef = useRef<MediaStream | null>(null);
   const guestVoiceLocalTrackRef = useRef<MediaStreamTrack | null>(null);
   const guestVoiceSenderRef = useRef<RTCRtpSender | null>(null);
+  const guestVideoReceiverRef = useRef<RTCRtpReceiver | null>(null);
   const guestStreamStatsBaselineRef = useRef<{ bytesReceived: number; measuredAtMs: number } | undefined>(undefined);
+  const guestStreamBufferDelayMsRef = useRef<number>(0);
   const guestAutoResyncTimerRef = useRef<number | null>(null);
   const guestHardResyncTimerRef = useRef<number | null>(null);
   const guestBootstrapResyncTimerRef = useRef<number | null>(null);
@@ -1316,13 +1324,15 @@ export function OnlineSessionPage() {
       fps: normalizeMetric(next.fps, 1),
       jitterMs: normalizeMetric(next.jitterMs, 4),
       rttMs: normalizeMetric(next.rttMs, 4),
+      bufferDelayMs: normalizeMetric(next.bufferDelayMs, 8),
     };
     setGuestStreamTelemetry((current) => {
       if (
         current.bitrateKbps === normalizedNext.bitrateKbps &&
         current.fps === normalizedNext.fps &&
         current.jitterMs === normalizedNext.jitterMs &&
-        current.rttMs === normalizedNext.rttMs
+        current.rttMs === normalizedNext.rttMs &&
+        current.bufferDelayMs === normalizedNext.bufferDelayMs
       ) {
         return current;
       }
@@ -1857,6 +1867,31 @@ export function OnlineSessionPage() {
     }
   }, []);
 
+  const applyGuestVideoReceiverLatencyHint = useCallback((
+    receiver: RTCRtpReceiver | null,
+    mode: 'default' | 'recovery' = 'default',
+  ): void => {
+    if (!receiver) {
+      return;
+    }
+
+    try {
+      receiver.jitterBufferTarget =
+        mode === 'recovery' ? GUEST_VIDEO_JITTER_TARGET_RECOVERY_MS : GUEST_VIDEO_JITTER_TARGET_DEFAULT_MS;
+    } catch {
+      // Ignore unsupported jitterBufferTarget tuning on older browsers.
+    }
+  }, []);
+
+  const tuneGuestVideoElementForLowLatency = useCallback((video: HTMLVideoElement): void => {
+    video.defaultPlaybackRate = 1;
+    video.playbackRate = 1;
+    video.preload = 'none';
+    video.disablePictureInPicture = true;
+    video.disableRemotePlayback = true;
+    video.setAttribute('disableRemotePlayback', 'true');
+  }, []);
+
   const clearGuestChatAudioPlayback = useCallback((): void => {
     for (const element of guestChatAudioElementsRef.current.values()) {
       element.pause();
@@ -1912,9 +1947,11 @@ export function OnlineSessionPage() {
       guestPeerConnectionRef.current = null;
     }
     guestVoiceSenderRef.current = null;
+    guestVideoReceiverRef.current = null;
 
     guestPendingIceCandidatesRef.current = [];
     guestStreamStatsBaselineRef.current = undefined;
+    guestStreamBufferDelayMsRef.current = 0;
     guestLastPlaybackProgressAtRef.current = 0;
     guestLastPlaybackTimeRef.current = 0;
     guestLastPlaybackFramesRef.current = 0;
@@ -1931,6 +1968,8 @@ export function OnlineSessionPage() {
       video.onwaiting = null;
       video.onstalled = null;
       video.onerror = null;
+      video.playbackRate = 1;
+      video.defaultPlaybackRate = 1;
       video.srcObject = null;
     }
   }, [
@@ -2031,6 +2070,7 @@ export function OnlineSessionPage() {
         setHostStreamStatus('connecting');
         setGuestPlaybackState('starting');
       } else {
+        applyGuestVideoReceiverLatencyHint(guestVideoReceiverRef.current, 'recovery');
         setHostStreamStatus((current) => (current === 'live' ? current : 'connecting'));
         setGuestPlaybackState((current) => (current === 'starting' ? current : 'recovering'));
       }
@@ -2049,6 +2089,7 @@ export function OnlineSessionPage() {
       return true;
     },
     [
+      applyGuestVideoReceiverLatencyHint,
       clearGuestAutoResyncTimer,
       clearGuestBootstrapResyncTimer,
       clearGuestHardResyncTimer,
@@ -2074,9 +2115,11 @@ export function OnlineSessionPage() {
   }, [autoStallRecoveryEnabled, hostStreamStatus, isHost, requestGuestStreamResync]);
 
   const wireGuestVideoStatusHandlers = useCallback((video: HTMLVideoElement): void => {
+    tuneGuestVideoElementForLowLatency(video);
     video.onloadeddata = () => {
       clearGuestAutoResyncTimer();
       clearGuestHardResyncTimer();
+      applyGuestVideoReceiverLatencyHint(guestVideoReceiverRef.current, 'default');
       guestStreamLiveAtRef.current = performance.now();
       guestLastPlaybackProgressAtRef.current = performance.now();
       guestLastPlaybackTimeRef.current = video.currentTime;
@@ -2090,6 +2133,8 @@ export function OnlineSessionPage() {
     video.onplaying = () => {
       clearGuestAutoResyncTimer();
       clearGuestHardResyncTimer();
+      applyGuestVideoReceiverLatencyHint(guestVideoReceiverRef.current, 'default');
+      video.playbackRate = 1;
       guestStreamLiveAtRef.current = performance.now();
       guestLastPlaybackProgressAtRef.current = performance.now();
       guestLastPlaybackTimeRef.current = video.currentTime;
@@ -2101,16 +2146,24 @@ export function OnlineSessionPage() {
       setGuestPlaybackState('live');
     };
     video.onwaiting = () => {
+      applyGuestVideoReceiverLatencyHint(guestVideoReceiverRef.current, 'recovery');
       setGuestPlaybackState('stalled');
     };
     video.onstalled = () => {
+      applyGuestVideoReceiverLatencyHint(guestVideoReceiverRef.current, 'recovery');
       setGuestPlaybackState('stalled');
     };
     video.onerror = () => {
+      applyGuestVideoReceiverLatencyHint(guestVideoReceiverRef.current, 'recovery');
       setHostStreamStatus('error');
       setGuestPlaybackState('recovering');
     };
-  }, [clearGuestAutoResyncTimer, clearGuestHardResyncTimer]);
+  }, [
+    applyGuestVideoReceiverLatencyHint,
+    clearGuestAutoResyncTimer,
+    clearGuestHardResyncTimer,
+    tuneGuestVideoElementForLowLatency,
+  ]);
 
   const ensureGuestPeerConnection = useCallback((hostClientId: string): RTCPeerConnection => {
     const existing = guestPeerConnectionRef.current;
@@ -2142,6 +2195,17 @@ export function OnlineSessionPage() {
       if (event.track.kind === 'audio' && stream.getVideoTracks().length === 0) {
         attachGuestChatAudioTrack(event.track);
         return;
+      }
+      if (event.track.kind === 'video') {
+        guestVideoReceiverRef.current = event.receiver;
+        applyGuestVideoReceiverLatencyHint(event.receiver, 'default');
+        try {
+          if (event.track.contentHint !== 'motion') {
+            event.track.contentHint = 'motion';
+          }
+        } catch {
+          // Ignore content hint failures; playback can proceed with defaults.
+        }
       }
 
       const video = hostStreamVideoRef.current;
@@ -2189,6 +2253,7 @@ export function OnlineSessionPage() {
     return connection;
   }, [
     attachGuestChatAudioTrack,
+    applyGuestVideoReceiverLatencyHint,
     guestGameAudioVolume,
     lobbyAudioMuted,
     scheduleGuestAutoResync,
@@ -2741,6 +2806,7 @@ export function OnlineSessionPage() {
   useEffect(() => {
     if (isHost || hostStreamStatus === 'idle' || hostStreamStatus === 'error' || !guestStreamAttached) {
       guestStreamStatsBaselineRef.current = undefined;
+      guestStreamBufferDelayMsRef.current = 0;
       setGuestStreamTelemetryIfChanged({});
       return;
     }
@@ -2780,6 +2846,7 @@ export function OnlineSessionPage() {
 
         if (!inbound) {
           if (!cancelled) {
+            guestStreamBufferDelayMsRef.current = 0;
             setGuestStreamTelemetryIfChanged({});
           }
           return;
@@ -2787,6 +2854,7 @@ export function OnlineSessionPage() {
 
         const measuredAtMs = performance.now();
         let bitrateKbps: number | undefined;
+        let bufferDelayMs: number | undefined;
         if (typeof inbound.bytesReceived === 'number') {
           const previous = guestStreamStatsBaselineRef.current;
           if (
@@ -2805,6 +2873,14 @@ export function OnlineSessionPage() {
             measuredAtMs,
           };
         }
+        if (
+          typeof inbound.jitterBufferDelay === 'number' &&
+          typeof inbound.jitterBufferEmittedCount === 'number' &&
+          inbound.jitterBufferEmittedCount > 0
+        ) {
+          bufferDelayMs = Math.round((inbound.jitterBufferDelay / inbound.jitterBufferEmittedCount) * 1_000);
+        }
+        guestStreamBufferDelayMsRef.current = bufferDelayMs ?? 0;
 
         if (cancelled) {
           return;
@@ -2821,9 +2897,11 @@ export function OnlineSessionPage() {
             typeof candidatePair?.currentRoundTripTime === 'number'
               ? Math.round(candidatePair.currentRoundTripTime * 1_000)
               : undefined,
+          bufferDelayMs,
         });
       } catch {
         if (!cancelled) {
+          guestStreamBufferDelayMsRef.current = 0;
           setGuestStreamTelemetryIfChanged({});
         }
       }
@@ -2851,16 +2929,38 @@ export function OnlineSessionPage() {
 
     const timer = window.setInterval(() => {
       const video = hostStreamVideoRef.current;
-      if (!video || document.visibilityState === 'hidden') {
+      if (!video) {
+        return;
+      }
+      if (document.visibilityState === 'hidden') {
+        if (video.playbackRate !== 1) {
+          video.playbackRate = 1;
+        }
         return;
       }
       if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || video.paused || video.ended) {
+        if (video.playbackRate !== 1) {
+          video.playbackRate = 1;
+        }
         return;
       }
 
       const nowPerf = performance.now();
       if (guestStreamLiveAtRef.current > 0 && nowPerf - guestStreamLiveAtRef.current < GUEST_STALL_WARMUP_GRACE_MS) {
         return;
+      }
+      const bufferDelayMs = guestStreamBufferDelayMsRef.current;
+      const shouldCatchUp =
+        bufferDelayMs >= GUEST_PLAYBACK_CATCH_UP_MIN_BUFFER_MS &&
+        bufferDelayMs <= GUEST_PLAYBACK_CATCH_UP_MAX_BUFFER_MS;
+      if (shouldCatchUp) {
+        applyGuestVideoReceiverLatencyHint(guestVideoReceiverRef.current, 'recovery');
+        if (video.playbackRate !== GUEST_PLAYBACK_CATCH_UP_RATE) {
+          video.playbackRate = GUEST_PLAYBACK_CATCH_UP_RATE;
+        }
+      } else if (video.playbackRate !== 1) {
+        applyGuestVideoReceiverLatencyHint(guestVideoReceiverRef.current, 'default');
+        video.playbackRate = 1;
       }
       const currentTime = video.currentTime;
       const currentFrames =
@@ -2914,6 +3014,7 @@ export function OnlineSessionPage() {
       window.clearInterval(timer);
     };
   }, [
+    applyGuestVideoReceiverLatencyHint,
     autoStallRecoveryEnabled,
     canSendRealtimeInput,
     guestStreamAttached,
@@ -5351,6 +5452,8 @@ export function OnlineSessionPage() {
                 playsInline
                 muted={lobbyAudioMuted}
                 controls={false}
+                disablePictureInPicture
+                disableRemotePlayback
               />
               {(isHost || hostStreamPlaceholderTitle) ? (
                 <div className="host-stream-placeholder">

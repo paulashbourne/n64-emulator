@@ -57,7 +57,7 @@ import type { SaveGameIdentity, SaveSlotRecord } from '../types/save';
 const PLAYER_SELECTOR = '#emulatorjs-player';
 const ONLINE_HEARTBEAT_INTERVAL_MS = 10_000;
 const ONLINE_STREAM_CAPTURE_FPS = 60;
-const ONLINE_STREAM_POLL_INTERVAL_MS = 700;
+const ONLINE_STREAM_POLL_INTERVAL_MS = 280;
 const ONLINE_HOST_STREAM_STATS_INTERVAL_MS = 2_000;
 const ONLINE_STREAM_AUTOTUNE_STREAK_REQUIRED = 3;
 const ONLINE_STREAM_AUTOTUNE_COOLDOWN_MS = 12_000;
@@ -73,6 +73,9 @@ const SAVE_AUTOSYNC_INTERVAL_MS = 20_000;
 const PLAY_COMPACT_HUD_MAX_WIDTH = 980;
 const ONLINE_AUDIO_DEFAULT_GAME_VOLUME = 0.5;
 const ONLINE_AUDIO_DEFAULT_CHAT_VOLUME = 1;
+const ONLINE_STREAM_MIN_VIDEO_BITRATE_BPS = 450_000;
+const ONLINE_STREAM_LATENCY_GUARD_WARN_MS = 140;
+const ONLINE_STREAM_LATENCY_GUARD_POOR_MS = 200;
 const ONLINE_VOICE_MEDIA_CONSTRAINTS: MediaStreamConstraints = {
   audio: {
     echoCancellation: true,
@@ -167,22 +170,22 @@ const DEFAULT_ONLINE_HOST_DIAGNOSTICS_PREFERENCES: OnlineHostDiagnosticsPreferen
 const HOST_STREAM_QUALITY_PROFILES: Record<EffectiveHostStreamQualityPreset, HostStreamQualityProfile> = {
   ultra_low_latency: {
     label: 'Ultra Low Latency',
-    description: 'Prioritizes responsiveness by limiting bitrate and resolution scaling aggressively.',
-    maxBitrateBps: 1_500_000,
+    description: 'Prioritizes responsiveness with tighter bitrate and stronger downscaling for fast recovery.',
+    maxBitrateBps: 1_200_000,
     maxFramerate: 60,
-    scaleResolutionDownBy: 1.3,
+    scaleResolutionDownBy: 1.65,
   },
   balanced: {
     label: 'Balanced',
-    description: 'Balances responsiveness and image detail for most broadband connections.',
-    maxBitrateBps: 3_000_000,
+    description: 'Latency-first default that keeps motion smooth while preserving usable image detail.',
+    maxBitrateBps: 2_300_000,
     maxFramerate: 60,
-    scaleResolutionDownBy: 1,
+    scaleResolutionDownBy: 1.2,
   },
   quality: {
     label: 'Quality',
-    description: 'Uses higher bitrate for cleaner frames on stronger networks.',
-    maxBitrateBps: 5_500_000,
+    description: 'Uses higher bitrate for cleaner frames when link health is consistently strong.',
+    maxBitrateBps: 4_600_000,
     maxFramerate: 60,
     scaleResolutionDownBy: 1,
   },
@@ -641,6 +644,7 @@ export function PlayPage() {
   const onlineHostRelayVoiceStreamsRef = useRef<Map<string, MediaStream>>(new Map());
   const onlineHostVoicePlaybackRef = useRef<Map<string, HTMLAudioElement>>(new Map());
   const onlineHostStatsBaselineRef = useRef<Map<string, { bytesSent: number; measuredAtMs: number }>>(new Map());
+  const onlineHostViewerTelemetryRef = useRef<Record<string, HostViewerStreamTelemetry>>({});
   const handleHostWebRtcSignalRef = useRef<((message: HostWebRtcSignalMessage) => void) | null>(null);
   const syncHostStreamingPeersRef = useRef<((session: MultiplayerSessionSnapshot) => void) | null>(null);
   const resyncHostStreamForClientRef = useRef<
@@ -762,6 +766,10 @@ export function PlayPage() {
           ? 'status-pill status-bad'
           : 'status-pill';
 
+  useEffect(() => {
+    onlineHostViewerTelemetryRef.current = onlineHostViewerTelemetry;
+  }, [onlineHostViewerTelemetry]);
+
   const activeProfile = useMemo<ControllerProfile | undefined>(
     () => profiles.find((profile) => profile.profileId === activeProfileId),
     [profiles, activeProfileId],
@@ -821,15 +829,22 @@ export function PlayPage() {
     }
 
     if (
-      (streamRtt === undefined || streamRtt <= 80) &&
-      (relayRtt === undefined || relayRtt <= 100) &&
+      onlineStreamPeers <= 1 &&
+      (streamRtt === undefined || streamRtt <= 55) &&
+      (relayRtt === undefined || relayRtt <= 65) &&
       (!limitation || limitation === 'none')
     ) {
       return 'quality';
     }
 
     return 'balanced';
-  }, [onlineHostStreamTelemetry.qualityLimitationReason, onlineHostStreamTelemetry.rttMs, onlineLatencyMs, onlineStreamQualityPreset]);
+  }, [
+    onlineHostStreamTelemetry.qualityLimitationReason,
+    onlineHostStreamTelemetry.rttMs,
+    onlineLatencyMs,
+    onlineStreamPeers,
+    onlineStreamQualityPreset,
+  ]);
   const hostStreamHealthAssessment = useMemo(
     () =>
       assessHostStreamHealth({
@@ -1261,20 +1276,62 @@ export function PlayPage() {
     setOnlineHostStreamHasGameAudio(false);
   }, []);
 
-  const applyHostStreamQualityToConnection = useCallback((connection: RTCPeerConnection): void => {
+  const applyHostStreamQualityToConnection = useCallback((
+    connection: RTCPeerConnection,
+    targetClientId?: string,
+  ): void => {
     const profile = HOST_STREAM_QUALITY_PROFILES[effectiveOnlineStreamQualityPreset];
+    const viewerTelemetry = targetClientId
+      ? onlineHostViewerTelemetryRef.current[targetClientId]
+      : undefined;
+    const relayPingMs = targetClientId
+      ? onlineSessionSnapshotRef.current?.members.find((member) => member.clientId === targetClientId)?.pingMs
+      : undefined;
+    const measuredLatencyMs = Math.max(viewerTelemetry?.rttMs ?? 0, relayPingMs ?? 0);
+
+    let bitrateMultiplier = 1;
+    let scaleResolutionBoost = 0;
+    let maxFramerate = profile.maxFramerate;
+    if (measuredLatencyMs >= ONLINE_STREAM_LATENCY_GUARD_POOR_MS) {
+      bitrateMultiplier = 0.58;
+      scaleResolutionBoost = 0.9;
+      maxFramerate = Math.min(profile.maxFramerate, 52);
+    } else if (measuredLatencyMs >= ONLINE_STREAM_LATENCY_GUARD_WARN_MS) {
+      bitrateMultiplier = 0.78;
+      scaleResolutionBoost = 0.4;
+      maxFramerate = Math.min(profile.maxFramerate, 56);
+    }
+    const targetBitrate = Math.max(
+      ONLINE_STREAM_MIN_VIDEO_BITRATE_BPS,
+      Math.round(profile.maxBitrateBps * bitrateMultiplier),
+    );
+    const targetScaleResolutionDownBy = Math.max(
+      1,
+      Number((profile.scaleResolutionDownBy + scaleResolutionBoost).toFixed(2)),
+    );
+
     for (const sender of connection.getSenders()) {
       if (sender.track?.kind !== 'video') {
         continue;
+      }
+
+      try {
+        if (sender.track.contentHint !== 'motion') {
+          sender.track.contentHint = 'motion';
+        }
+      } catch {
+        // Ignore track hint failures on browsers that restrict runtime hint changes.
       }
 
       const parameters = sender.getParameters();
       const existingEncoding = parameters.encodings?.[0] ?? {};
       const nextEncoding: RTCRtpEncodingParameters = {
         ...existingEncoding,
-        maxBitrate: profile.maxBitrateBps,
-        maxFramerate: profile.maxFramerate,
-        scaleResolutionDownBy: profile.scaleResolutionDownBy,
+        maxBitrate: targetBitrate,
+        maxFramerate,
+        scaleResolutionDownBy: targetScaleResolutionDownBy,
+        priority: 'high',
+        networkPriority: 'high',
       };
       const nextParameters = {
         ...parameters,
@@ -1492,7 +1549,7 @@ export function PlayPage() {
       }
     }
 
-    applyHostStreamQualityToConnection(connection);
+    applyHostStreamQualityToConnection(connection, targetClientId);
 
     return {
       hasMediaTrack: desiredTracks.size > 0,
@@ -1558,10 +1615,17 @@ export function PlayPage() {
     if (!onlineRelayEnabled || !isOnlineHost) {
       return;
     }
-    for (const peerState of onlineHostPeersRef.current.values()) {
-      applyHostStreamQualityToConnection(peerState.connection);
+    for (const [clientId, peerState] of onlineHostPeersRef.current.entries()) {
+      applyHostStreamQualityToConnection(peerState.connection, clientId);
     }
-  }, [applyHostStreamQualityToConnection, isOnlineHost, onlineRelayEnabled, onlineStreamPeers]);
+  }, [
+    applyHostStreamQualityToConnection,
+    isOnlineHost,
+    onlineHostViewerTelemetry,
+    onlineRelayEnabled,
+    onlineSessionSnapshot?.members,
+    onlineStreamPeers,
+  ]);
 
   const handleHostWebRtcSignal = useCallback((message: HostWebRtcSignalMessage): void => {
     if (!isOnlineHostRef.current) {
@@ -2044,6 +2108,13 @@ export function PlayPage() {
     if (!videoTrack) {
       capturedStream.getTracks().forEach((track) => track.stop());
       return false;
+    }
+    try {
+      if (videoTrack.contentHint !== 'motion') {
+        videoTrack.contentHint = 'motion';
+      }
+    } catch {
+      // Some browsers lock content hints for captured tracks; continue with defaults.
     }
 
     stopOnlineHostStream();
