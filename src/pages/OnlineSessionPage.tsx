@@ -66,6 +66,8 @@ const REMOTE_FEED_UI_FLUSH_MS_BACKGROUND = 320;
 const REMOTE_FEED_PAUSED_COUNT_FLUSH_MS = 180;
 const ONLINE_COMPACT_VIEWPORT_MAX_WIDTH = 960;
 const ONLINE_PHONE_VIEWPORT_MAX_WIDTH = 720;
+const INPUT_DATA_CHANNEL_LABEL = 'warpdeck64-input-v1';
+const INPUT_DATA_CHANNEL_BUFFER_HIGH_WATERMARK = 24_000;
 
 type HostStreamStatus = 'idle' | 'connecting' | 'live' | 'error';
 type WizardMode = 'create' | 'edit';
@@ -670,6 +672,22 @@ function sendInputPayload(socket: WebSocket | null, payload: MultiplayerInputPay
   );
 }
 
+function sendInputPayloadOverDataChannel(channel: RTCDataChannel | null, payload: MultiplayerInputPayload): boolean {
+  if (!channel || channel.readyState !== 'open') {
+    return false;
+  }
+  if (channel.bufferedAmount > INPUT_DATA_CHANNEL_BUFFER_HIGH_WATERMARK) {
+    return false;
+  }
+
+  try {
+    channel.send(JSON.stringify(payload));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function sendWebRtcSignal(
   socket: WebSocket | null,
   targetClientId: string,
@@ -713,6 +731,7 @@ export function OnlineSessionPage() {
   const quickHoldControlsRef = useRef(new Set<N64ControlTarget>());
   const suppressQuickTapUntilRef = useRef<number>(0);
   const guestPeerConnectionRef = useRef<RTCPeerConnection | null>(null);
+  const guestInputDataChannelRef = useRef<RTCDataChannel | null>(null);
   const guestPendingIceCandidatesRef = useRef<RTCIceCandidateInit[]>([]);
   const guestChatAudioElementsRef = useRef<Map<string, HTMLAudioElement>>(new Map());
   const guestVoiceLocalStreamRef = useRef<MediaStream | null>(null);
@@ -790,6 +809,7 @@ export function OnlineSessionPage() {
   const [savingHostRomSelection, setSavingHostRomSelection] = useState(false);
   const [hostStreamStatus, setHostStreamStatus] = useState<HostStreamStatus>('idle');
   const hostStreamStatusRef = useRef<HostStreamStatus>('idle');
+  const [guestInputTransport, setGuestInputTransport] = useState<'p2p' | 'relay'>('relay');
   const guestGameVolumeBeforeMuteRef = useRef(1);
   const guestChatVolumeBeforeMuteRef = useRef(1);
   const [lobbyAudioMuted, setLobbyAudioMuted] = useState(false);
@@ -922,7 +942,8 @@ export function OnlineSessionPage() {
   const mutedInputClientIds = useMemo(() => session?.mutedInputClientIds ?? [], [session?.mutedInputClientIds]);
   const mutedInputClientIdsSet = useMemo(() => new Set(mutedInputClientIds), [mutedInputClientIds]);
   const currentMemberInputMuted = currentMember ? mutedInputClientIdsSet.has(currentMember.clientId) : false;
-  const canSendGuestControllerInput = canSendRealtimeInput && !currentMemberInputMuted;
+  const canSendGuestControllerInput =
+    !sessionClosedReason && !currentMemberInputMuted && (canSendRealtimeInput || guestInputTransport === 'p2p');
   const selectedHostRom: RomRecord | undefined =
     hostRomSelectionId === NO_ROOM_ROM ? undefined : roms.find((rom) => rom.id === hostRomSelectionId);
   const autoLaunchRoute = session?.romId ? buildSessionPlayUrl(session.romId, sessionContext) : undefined;
@@ -1932,16 +1953,69 @@ export function OnlineSessionPage() {
     };
   }, [guestChatAudioVolume]);
 
+  const clearGuestInputDataChannel = useCallback((): void => {
+    const channel = guestInputDataChannelRef.current;
+    if (channel) {
+      channel.onopen = null;
+      channel.onclose = null;
+      channel.onerror = null;
+      channel.onmessage = null;
+      try {
+        channel.close();
+      } catch {
+        // Ignore close failures while cleaning up stale channels.
+      }
+    }
+    guestInputDataChannelRef.current = null;
+    setGuestInputTransport('relay');
+  }, []);
+
+  const attachGuestInputDataChannel = useCallback((channel: RTCDataChannel): void => {
+    const previous = guestInputDataChannelRef.current;
+    if (previous && previous !== channel) {
+      previous.onopen = null;
+      previous.onclose = null;
+      previous.onerror = null;
+      previous.onmessage = null;
+      try {
+        previous.close();
+      } catch {
+        // Ignore close failures while replacing channels.
+      }
+    }
+
+    guestInputDataChannelRef.current = channel;
+    setGuestInputTransport(channel.readyState === 'open' ? 'p2p' : 'relay');
+    channel.onopen = () => {
+      if (guestInputDataChannelRef.current !== channel) {
+        return;
+      }
+      setGuestInputTransport('p2p');
+    };
+    const onUnavailable = (): void => {
+      if (guestInputDataChannelRef.current !== channel) {
+        return;
+      }
+      guestInputDataChannelRef.current = null;
+      setGuestInputTransport('relay');
+    };
+    channel.onclose = onUnavailable;
+    channel.onerror = onUnavailable;
+    channel.onmessage = null;
+  }, []);
+
   const clearGuestPeerConnection = useCallback((): void => {
     clearGuestAutoResyncTimer();
     clearGuestHardResyncTimer();
     clearGuestBootstrapResyncTimer();
     clearGuestChatAudioPlayback();
+    clearGuestInputDataChannel();
 
     const peer = guestPeerConnectionRef.current;
     if (peer) {
       peer.onicecandidate = null;
       peer.ontrack = null;
+      peer.ondatachannel = null;
       peer.onconnectionstatechange = null;
       peer.close();
       guestPeerConnectionRef.current = null;
@@ -1976,6 +2050,7 @@ export function OnlineSessionPage() {
     clearGuestAutoResyncTimer,
     clearGuestBootstrapResyncTimer,
     clearGuestChatAudioPlayback,
+    clearGuestInputDataChannel,
     clearGuestHardResyncTimer,
     setGuestStreamTelemetryIfChanged,
   ]);
@@ -2190,6 +2265,12 @@ export function OnlineSessionPage() {
         candidate: event.candidate.toJSON(),
       });
     };
+    connection.ondatachannel = (event) => {
+      if (event.channel.label !== INPUT_DATA_CHANNEL_LABEL) {
+        return;
+      }
+      attachGuestInputDataChannel(event.channel);
+    };
     connection.ontrack = (event) => {
       const stream = event.streams[0] ?? new MediaStream([event.track]);
       if (event.track.kind === 'audio' && stream.getVideoTracks().length === 0) {
@@ -2225,16 +2306,19 @@ export function OnlineSessionPage() {
     };
     connection.onconnectionstatechange = () => {
       if (connection.connectionState === 'disconnected') {
+        setGuestInputTransport('relay');
         setGuestPlaybackState((current) => (current === 'live' ? 'recovering' : current));
         scheduleGuestAutoResync();
         return;
       }
       if (connection.connectionState === 'failed') {
+        setGuestInputTransport('relay');
         setHostStreamStatus('error');
         setGuestPlaybackState('recovering');
         return;
       }
       if (connection.connectionState === 'closed') {
+        setGuestInputTransport('relay');
         setHostStreamStatus('idle');
         setGuestPlaybackState('starting');
       }
@@ -2252,6 +2336,7 @@ export function OnlineSessionPage() {
     guestPeerConnectionRef.current = connection;
     return connection;
   }, [
+    attachGuestInputDataChannel,
     attachGuestChatAudioTrack,
     applyGuestVideoReceiverLatencyHint,
     guestGameAudioVolume,
@@ -3099,20 +3184,30 @@ export function OnlineSessionPage() {
     };
   }, []);
 
+  const sendGuestInputPayload = useCallback((payload: MultiplayerInputPayload): void => {
+    if (sendInputPayloadOverDataChannel(guestInputDataChannelRef.current, payload)) {
+      setGuestInputTransport('p2p');
+      return;
+    }
+
+    setGuestInputTransport('relay');
+    sendInputPayload(socketRef.current, payload);
+  }, []);
+
   const emitRemoteDigitalControl = useCallback((payload: MultiplayerDigitalInputPayload): void => {
     if (!canSendGuestControllerInput || isHost) {
       return;
     }
-    sendInputPayload(socketRef.current, payload);
-  }, [canSendGuestControllerInput, isHost]);
+    sendGuestInputPayload(payload);
+  }, [canSendGuestControllerInput, isHost, sendGuestInputPayload]);
 
   const emitRemoteAnalogState = useCallback((x: number, y: number): void => {
     if (!canSendGuestControllerInput || isHost) {
       return;
     }
 
-    sendInputPayload(socketRef.current, buildAnalogInputPayload(x, y));
-  }, [canSendGuestControllerInput, isHost]);
+    sendGuestInputPayload(buildAnalogInputPayload(x, y));
+  }, [canSendGuestControllerInput, isHost, sendGuestInputPayload]);
 
   const maybeEmitRemoteAnalogState = useCallback((x: number, y: number, options?: { force?: boolean }): void => {
     const nextAnalog = {
@@ -5480,7 +5575,10 @@ export function OnlineSessionPage() {
               <div className="session-status-row host-stream-telemetry-row">
                 <span className={guestNetworkHealthStatus.className}>Network: {guestNetworkHealthStatus.label}</span>
                 <span className={guestPlaybackStatus.className}>Playback: {guestPlaybackStatus.label}</span>
-                <span className="status-pill">Input relay: {guestInputRelayProfile.label}</span>
+                <span className="status-pill">
+                  Input: {guestInputTransport === 'p2p' ? 'P2P data channel' : 'Relay fallback'}
+                </span>
+                <span className="status-pill">Relay mode: {guestInputRelayProfile.label}</span>
                 <span className="status-pill">
                   Bitrate: {guestStreamTelemetry.bitrateKbps !== undefined ? `${guestStreamTelemetry.bitrateKbps} kbps` : 'Measuring…'}
                 </span>
@@ -5641,7 +5739,8 @@ export function OnlineSessionPage() {
                 Analog stick movement is streamed with variable intensity for smoother remote control.
               </p>
               <p className="online-subtle">
-                Relay mode is optimized automatically ({guestInputRelayProfile.label}) for lower input delay and steadier stream sync.
+                Input transport prefers direct peer link when available and falls back to relay mode (
+                {guestInputRelayProfile.label}) when needed.
               </p>
               <p className="online-subtle">
                 Smart recovery stays enabled in the background to re-sync if playback freezes.

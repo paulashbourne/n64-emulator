@@ -47,6 +47,7 @@ import { useAppStore } from '../state/appStore';
 import type { ControllerProfile, N64ControlTarget } from '../types/input';
 import type {
   HostStreamQualityPresetHint,
+  MultiplayerInputPayload,
   MultiplayerSessionSnapshot,
   MultiplayerSocketMessage,
   MultiplayerWebRtcSignalPayload,
@@ -76,6 +77,7 @@ const ONLINE_AUDIO_DEFAULT_CHAT_VOLUME = 1;
 const ONLINE_STREAM_MIN_VIDEO_BITRATE_BPS = 450_000;
 const ONLINE_STREAM_LATENCY_GUARD_WARN_MS = 140;
 const ONLINE_STREAM_LATENCY_GUARD_POOR_MS = 200;
+const ONLINE_INPUT_DATA_CHANNEL_LABEL = 'warpdeck64-input-v1';
 const ONLINE_VOICE_MEDIA_CONSTRAINTS: MediaStreamConstraints = {
   audio: {
     echoCancellation: true,
@@ -97,6 +99,7 @@ interface HostStreamingPeerState {
   negotiationInFlight: boolean;
   negotiated: boolean;
   disconnectTimer: number | null;
+  inputChannel: RTCDataChannel | null;
 }
 
 interface HostStreamTelemetry {
@@ -320,6 +323,14 @@ function revokeRomBlobUrl(ref: MutableRefObject<string | null>): void {
 function tryParseSocketMessage(raw: string): MultiplayerSocketMessage | null {
   try {
     return JSON.parse(raw) as MultiplayerSocketMessage;
+  } catch {
+    return null;
+  }
+}
+
+function tryParsePeerInputPayload(raw: string): MultiplayerInputPayload | null {
+  try {
+    return parseRemoteInputPayload(JSON.parse(raw));
   } catch {
     return null;
   }
@@ -1233,8 +1244,22 @@ export function PlayPage() {
       peerState.disconnectTimer = null;
     }
 
+    if (peerState.inputChannel) {
+      peerState.inputChannel.onopen = null;
+      peerState.inputChannel.onclose = null;
+      peerState.inputChannel.onerror = null;
+      peerState.inputChannel.onmessage = null;
+      try {
+        peerState.inputChannel.close();
+      } catch {
+        // Ignore channel close failures while tearing down peers.
+      }
+      peerState.inputChannel = null;
+    }
+
     peerState.connection.onicecandidate = null;
     peerState.connection.onconnectionstatechange = null;
+    peerState.connection.ondatachannel = null;
     peerState.connection.ontrack = null;
     peerState.connection.close();
     onlineHostPeersRef.current.delete(clientId);
@@ -1359,6 +1384,116 @@ export function PlayPage() {
     );
   }, []);
 
+  const handleIncomingGuestInput = useCallback((input: {
+    fromClientId: string;
+    payload: MultiplayerInputPayload | null;
+    fromName?: string;
+    fromSlot?: number;
+  }): void => {
+    if (!isOnlineHostRef.current) {
+      return;
+    }
+
+    const session = onlineSessionSnapshotRef.current;
+    const member = session?.members.find((candidate) => candidate.clientId === input.fromClientId);
+    const fromName = member?.name ?? input.fromName;
+    const fromSlot = member?.slot ?? input.fromSlot;
+    if (!fromName || typeof fromSlot !== 'number' || !Number.isInteger(fromSlot)) {
+      return;
+    }
+
+    const inputDescription = describeRemoteInputPayload(input.payload);
+    const mutedByHost = member ? (session?.mutedInputClientIds ?? []).includes(member.clientId) : false;
+    if (mutedByHost) {
+      const resetApplied = applyRemoteInputResetToHost(fromSlot);
+      if (resetApplied) {
+        setOnlineRemoteEventsBlocked((current) => current + 1);
+        setOnlineLastRemoteInput(`${fromName} (${fromSlot}) ${inputDescription} input muted by host.`);
+      }
+      return;
+    }
+
+    const applied = applyRemoteInputPayloadToHost({
+      fromSlot,
+      payload: input.payload,
+    });
+    if (!applied) {
+      setOnlineLastRemoteInput(`${fromName} (${fromSlot}) ${inputDescription} not applied.`);
+      return;
+    }
+
+    setOnlineRemoteEventsApplied((current) => current + 1);
+    setOnlineLastRemoteInput(`${fromName} (${fromSlot}) ${inputDescription}`);
+  }, []);
+
+  const attachHostInputDataChannel = useCallback((targetClientId: string, channel: RTCDataChannel): void => {
+    const peerState = onlineHostPeersRef.current.get(targetClientId);
+    if (!peerState) {
+      try {
+        channel.close();
+      } catch {
+        // Ignore close failures for channels created during shutdown races.
+      }
+      return;
+    }
+
+    const previous = peerState.inputChannel;
+    if (previous && previous !== channel) {
+      previous.onopen = null;
+      previous.onclose = null;
+      previous.onerror = null;
+      previous.onmessage = null;
+      try {
+        previous.close();
+      } catch {
+        // Ignore close failures while replacing channels.
+      }
+    }
+
+    peerState.inputChannel = channel;
+    const clearIfCurrent = (): void => {
+      const latest = onlineHostPeersRef.current.get(targetClientId);
+      if (!latest || latest.inputChannel !== channel) {
+        return;
+      }
+      latest.inputChannel = null;
+    };
+
+    channel.onopen = () => {
+      const latest = onlineHostPeersRef.current.get(targetClientId);
+      if (!latest || latest.inputChannel !== channel) {
+        return;
+      }
+      latest.inputChannel = channel;
+    };
+    channel.onclose = clearIfCurrent;
+    channel.onerror = clearIfCurrent;
+    channel.onmessage = (event) => {
+      if (typeof event.data !== 'string') {
+        return;
+      }
+      const parsedPayload = tryParsePeerInputPayload(event.data);
+      handleIncomingGuestInput({
+        fromClientId: targetClientId,
+        payload: parsedPayload,
+      });
+    };
+  }, [handleIncomingGuestInput]);
+
+  const ensureHostInputDataChannel = useCallback((targetClientId: string): boolean => {
+    const peerState = onlineHostPeersRef.current.get(targetClientId);
+    if (!peerState || peerState.inputChannel) {
+      return false;
+    }
+
+    const channel = peerState.connection.createDataChannel(ONLINE_INPUT_DATA_CHANNEL_LABEL, {
+      ordered: false,
+      maxRetransmits: 0,
+    });
+    attachHostInputDataChannel(targetClientId, channel);
+    return true;
+  }, [attachHostInputDataChannel]);
+
   const ensureHostPeerNegotiation = useCallback((targetClientId: string): void => {
     const peerState = onlineHostPeersRef.current.get(targetClientId);
     if (!peerState || peerState.negotiationInFlight) {
@@ -1475,8 +1610,21 @@ export function PlayPage() {
       }
     };
 
+    connection.ondatachannel = (event) => {
+      if (event.channel.label !== ONLINE_INPUT_DATA_CHANNEL_LABEL) {
+        return;
+      }
+      attachHostInputDataChannel(targetClientId, event.channel);
+    };
+
     return connection;
-  }, [closeOnlineHostPeer, onlineHostChatVolume, removeOnlineHostRelayVoiceTrack, sendWebRtcSignal]);
+  }, [
+    attachHostInputDataChannel,
+    closeOnlineHostPeer,
+    onlineHostChatVolume,
+    removeOnlineHostRelayVoiceTrack,
+    sendWebRtcSignal,
+  ]);
 
   const attachHostStreamToPeer = useCallback((
     connection: RTCPeerConnection,
@@ -1589,12 +1737,14 @@ export function PlayPage() {
           negotiationInFlight: false,
           negotiated: false,
           disconnectTimer: null,
+          inputChannel: null,
         };
         onlineHostPeersRef.current.set(member.clientId, peerState);
       }
 
+      const channelAdded = ensureHostInputDataChannel(member.clientId);
       const attachment = attachHostStreamToPeer(peerState.connection, member.clientId);
-      const shouldNegotiate = attachment.trackAdded || attachment.trackRemoved || !peerState.negotiated;
+      const shouldNegotiate = channelAdded || attachment.trackAdded || attachment.trackRemoved || !peerState.negotiated;
       if (attachment.hasMediaTrack && shouldNegotiate) {
         ensureHostPeerNegotiation(member.clientId);
       }
@@ -1606,6 +1756,7 @@ export function PlayPage() {
     clearOnlineHostPeers,
     closeOnlineHostPeer,
     createHostPeerConnection,
+    ensureHostInputDataChannel,
     ensureHostPeerNegotiation,
     onlineClientId,
     setOnlineStreamPeerCountFromMap,
@@ -1646,8 +1797,10 @@ export function PlayPage() {
         negotiationInFlight: false,
         negotiated: false,
         disconnectTimer: null,
+        inputChannel: null,
       };
       onlineHostPeersRef.current.set(senderClientId, peerState);
+      ensureHostInputDataChannel(senderClientId);
       attachHostStreamToPeer(peerState.connection, senderClientId);
       setOnlineStreamPeerCountFromMap();
     }
@@ -1679,6 +1832,7 @@ export function PlayPage() {
     attachHostStreamToPeer,
     closeOnlineHostPeer,
     createHostPeerConnection,
+    ensureHostInputDataChannel,
     setOnlineStreamPeerCountFromMap,
   ]);
 
@@ -2582,20 +2736,12 @@ export function PlayPage() {
           return;
         }
 
-        const parsedPayload = parseRemoteInputPayload(message.payload);
-        const inputDescription = describeRemoteInputPayload(parsedPayload);
-
-        const applied = applyRemoteInputPayloadToHost({
+        handleIncomingGuestInput({
+          fromClientId: message.fromClientId,
+          fromName: message.fromName,
           fromSlot: message.fromSlot,
-          payload: parsedPayload,
+          payload: parseRemoteInputPayload(message.payload),
         });
-        if (!applied) {
-          setOnlineLastRemoteInput(`${message.fromName} (${message.fromSlot}) ${inputDescription} not applied.`);
-          return;
-        }
-
-        setOnlineRemoteEventsApplied((current) => current + 1);
-        setOnlineLastRemoteInput(`${message.fromName} (${message.fromSlot}) ${inputDescription}`);
       };
 
       socket.onclose = () => {
@@ -2638,6 +2784,7 @@ export function PlayPage() {
     };
   }, [
     clearOnlineHostPeers,
+    handleIncomingGuestInput,
     onlineClientId,
     onlineCode,
     onlineRelayEnabled,
