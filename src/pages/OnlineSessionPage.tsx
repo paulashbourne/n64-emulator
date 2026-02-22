@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, ty
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 
 import { ControllerWizard } from '../components/ControllerWizard';
+import { InSessionSettingsModal } from '../components/InSessionSettingsModal';
 import { VirtualController } from '../components/VirtualController';
 import { closeOnlineSession, getOnlineSession, kickOnlineMember, multiplayerSocketUrl } from '../online/multiplayerApi';
 import { buildAnalogInputPayload, buildDigitalInputPayload } from '../online/joinerInput';
@@ -739,6 +740,7 @@ export function OnlineSessionPage() {
   const guestPhoneDefaultsAppliedRef = useRef(false);
   const guestStreamPanelRef = useRef<HTMLElement | null>(null);
   const guestInputDeckRef = useRef<HTMLHeadingElement | null>(null);
+  const quickProfileSwitchRef = useRef<HTMLDetailsElement | null>(null);
   const playersPanelRef = useRef<HTMLElement | null>(null);
   const hostControlsPanelRef = useRef<HTMLElement | null>(null);
   const chatPanelRef = useRef<HTMLElement | null>(null);
@@ -791,6 +793,7 @@ export function OnlineSessionPage() {
   const [wizardOpen, setWizardOpen] = useState(false);
   const [wizardMode, setWizardMode] = useState<WizardMode>('create');
   const [wizardTemplateProfile, setWizardTemplateProfile] = useState<ControllerProfile>();
+  const [settingsModalOpen, setSettingsModalOpen] = useState(false);
   const [enforceReadyBeforeLaunch, setEnforceReadyBeforeLaunch] = useState(false);
   const [autoLaunchWhenReady, setAutoLaunchWhenReady] = useState(false);
   const [readyAutoLaunchCountdown, setReadyAutoLaunchCountdown] = useState<number | null>(null);
@@ -877,6 +880,7 @@ export function OnlineSessionPage() {
     () => profiles.find((profile) => profile.profileId === activeProfileId),
     [activeProfileId, profiles],
   );
+  const activeProfileSummaryLabel = activeProfile?.name ?? 'None';
 
   const membersBySlot = useMemo(() => {
     const map = new Map<number, MultiplayerMember>();
@@ -3826,6 +3830,16 @@ export function OnlineSessionPage() {
         return;
       }
 
+      if (settingsModalOpen) {
+        if (event.code === 'Escape') {
+          event.preventDefault();
+          setSettingsModalOpen(false);
+          return;
+        }
+        event.preventDefault();
+        return;
+      }
+
       if (wizardOpen) {
         event.preventDefault();
         return;
@@ -3943,6 +3957,7 @@ export function OnlineSessionPage() {
     onTurboLatencyMode,
     resetGuestPhoneLayout,
     requestGuestStreamResync,
+    settingsModalOpen,
     showVirtualController,
     wizardOpen,
   ]);
@@ -4023,6 +4038,16 @@ export function OnlineSessionPage() {
         return;
       }
 
+      if (settingsModalOpen) {
+        if (event.code === 'Escape') {
+          event.preventDefault();
+          setSettingsModalOpen(false);
+          return;
+        }
+        event.preventDefault();
+        return;
+      }
+
       if (event.code === 'Escape' && document.activeElement === chatInputRef.current) {
         chatInputRef.current?.blur();
       }
@@ -4032,7 +4057,7 @@ export function OnlineSessionPage() {
     return () => {
       window.removeEventListener('keydown', onKeyDown);
     };
-  }, [onFocusChatComposer]);
+  }, [onFocusChatComposer, settingsModalOpen]);
 
   const sendChatMessage = useCallback((rawMessage: string, options?: { clearDraft?: boolean }): boolean => {
     if (!canSendRealtimeInput) {
@@ -4137,6 +4162,16 @@ export function OnlineSessionPage() {
         return;
       }
 
+      if (settingsModalOpen) {
+        if (event.code === 'Escape') {
+          event.preventDefault();
+          setSettingsModalOpen(false);
+          return;
+        }
+        event.preventDefault();
+        return;
+      }
+
       if (wizardOpen) {
         event.preventDefault();
         return;
@@ -4164,7 +4199,7 @@ export function OnlineSessionPage() {
     return () => {
       window.removeEventListener('keydown', onKeyDown);
     };
-  }, [isHost, onLaunchHostRom, onPingWaitingPlayers, onSendReadyCheck, wizardOpen]);
+  }, [isHost, onLaunchHostRom, onPingWaitingPlayers, onSendReadyCheck, settingsModalOpen, wizardOpen]);
 
   const onSendQuickChat = useCallback((message: string): void => {
     const sent = sendChatMessage(message);
@@ -4427,6 +4462,23 @@ export function OnlineSessionPage() {
     setWizardTemplateProfile(activeProfile);
     setWizardOpen(true);
   };
+
+  const onActiveProfileSelect = useCallback(
+    (event: ChangeEvent<HTMLSelectElement>): void => {
+      setActiveProfile(event.target.value || undefined);
+    },
+    [setActiveProfile],
+  );
+
+  const onQuickSwapProfileSelect = useCallback(
+    (event: ChangeEvent<HTMLSelectElement>): void => {
+      onActiveProfileSelect(event);
+      if (quickProfileSwitchRef.current) {
+        quickProfileSwitchRef.current.open = false;
+      }
+    },
+    [onActiveProfileSelect],
+  );
 
   const onProfileComplete = async (profile: ControllerProfile): Promise<void> => {
     await saveProfile(profile);
@@ -4857,6 +4909,9 @@ export function OnlineSessionPage() {
           ) : null}
           <button type="button" onClick={() => void onCopyInviteCode()}>
             Copy Invite Code
+          </button>
+          <button type="button" onClick={() => setSettingsModalOpen(true)}>
+            Settings
           </button>
           <button type="button" onClick={onToggleReady} disabled={!canSendRealtimeInput || !currentMember}>
             {currentMemberReady ? 'Mark Not Ready' : 'Mark Ready'}
@@ -5406,6 +5461,32 @@ export function OnlineSessionPage() {
                     Suggested host stream mode: {HOST_STREAM_PRESET_LABELS[suggestedHostPresetForGuest]}.
                   </p>
                 ) : null}
+                {profiles.length > 0 ? (
+                  <details ref={quickProfileSwitchRef} className="play-profile-quick-switch">
+                    <summary>
+                      <span className="play-profile-quick-switch-summary-label">Applied controller profile:</span>
+                      <span className="play-profile-quick-switch-summary-value">{activeProfileSummaryLabel}</span>
+                      <span className="play-profile-quick-switch-summary-hint">Quick swap</span>
+                    </summary>
+                    <div className="play-profile-quick-switch-panel">
+                      <label htmlFor="online-overlay-profile-switcher">Quick swap profile</label>
+                      <select
+                        id="online-overlay-profile-switcher"
+                        value={activeProfileId ?? ''}
+                        onChange={onQuickSwapProfileSelect}
+                      >
+                        <option value="">None</option>
+                        {profiles.map((profile) => (
+                          <option key={profile.profileId} value={profile.profileId}>
+                            {profile.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </details>
+                ) : (
+                  <p>Applied controller profile: {activeProfileSummaryLabel}</p>
+                )}
               </>
             )}
           </div>
@@ -5418,7 +5499,7 @@ export function OnlineSessionPage() {
               {profiles.length > 0 ? (
                 <label>
                   Active profile
-                  <select value={activeProfileId ?? ''} onChange={(event) => setActiveProfile(event.target.value || undefined)}>
+                  <select value={activeProfileId ?? ''} onChange={onActiveProfileSelect}>
                     <option value="">None</option>
                     {profiles.map((profile) => (
                       <option key={profile.profileId} value={profile.profileId}>
@@ -5930,6 +6011,10 @@ export function OnlineSessionPage() {
             onComplete={onProfileComplete}
           />
         </div>
+      ) : null}
+
+      {settingsModalOpen ? (
+        <InSessionSettingsModal title="Online Session Settings" onClose={() => setSettingsModalOpen(false)} />
       ) : null}
 
       {!isHost && showVirtualController ? (

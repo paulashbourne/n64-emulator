@@ -3,6 +3,7 @@ import type { ChangeEvent, MutableRefObject } from 'react';
 import { Link, NavLink, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 
 import { ControllerWizard } from '../components/ControllerWizard';
+import { InSessionSettingsModal } from '../components/InSessionSettingsModal';
 import { VirtualController } from '../components/VirtualController';
 import { applyProfileToRunningEmulator, controllerProfileToEmulatorJsControls } from '../emulator/emulatorJsControls';
 import {
@@ -679,6 +680,7 @@ export function PlayPage() {
   const [wizardOpen, setWizardOpen] = useState(false);
   const [wizardMode, setWizardMode] = useState<WizardMode>('create');
   const [wizardTemplateProfile, setWizardTemplateProfile] = useState<ControllerProfile>();
+  const [settingsModalOpen, setSettingsModalOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [hudHiddenByUser, setHudHiddenByUser] = useState(false);
   const [hudAutoHidden, setHudAutoHidden] = useState(false);
@@ -3323,6 +3325,17 @@ export function PlayPage() {
         return;
       }
 
+      if (event.code === 'Escape' && settingsModalOpen) {
+        event.preventDefault();
+        setSettingsModalOpen(false);
+        return;
+      }
+
+      if (settingsModalOpen) {
+        event.preventDefault();
+        return;
+      }
+
       if (event.code === 'Escape' && menuOpen) {
         event.preventDefault();
         setMenuOpen(false);
@@ -3414,6 +3427,7 @@ export function PlayPage() {
     onRetryBoot,
     onStabilizeDegradedViewers,
     onlineRelayEnabled,
+    settingsModalOpen,
     status,
     wizardOpen,
   ]);
@@ -3472,7 +3486,13 @@ export function PlayPage() {
                     Library
                   </NavLink>
                   <NavLink to={onlineRoute}>Online</NavLink>
-                  <NavLink to="/settings">Settings</NavLink>
+                  <button
+                    type="button"
+                    className="app-header-nav-button"
+                    onClick={() => setSettingsModalOpen(true)}
+                  >
+                    Settings
+                  </button>
                 </nav>
                 <button
                   type="button"
@@ -3697,6 +3717,9 @@ export function PlayPage() {
           <div className="wizard-actions">
             <button type="button" onClick={() => navigate(libraryRoute)}>
               Back to Library
+            </button>
+            <button type="button" onClick={() => setSettingsModalOpen(true)}>
+              Settings
             </button>
             <button type="button" onClick={onToggleHudVisibility}>
               {hudHiddenByUser ? 'Show HUD' : 'Hide HUD'}
@@ -4296,6 +4319,13 @@ export function PlayPage() {
             onComplete={onProfileComplete}
           />
         </div>
+      ) : null}
+
+      {settingsModalOpen ? (
+        <InSessionSettingsModal
+          title={onlineRelayEnabled ? 'Online Play Settings' : 'Local Play Settings'}
+          onClose={() => setSettingsModalOpen(false)}
+        />
       ) : null}
     </section>
   );
