@@ -14,6 +14,7 @@ import {
   type RecentOnlineSession,
 } from '../storage/appSettings';
 import { useAppStore } from '../state/appStore';
+import { useAuthStore } from '../state/authStore';
 
 const NO_ROM_SELECTED = '__none__';
 
@@ -58,7 +59,12 @@ function normalizeAvatarUrl(value: string | undefined): string | undefined {
   if (!normalized) {
     return undefined;
   }
-  if (normalized.startsWith('http://') || normalized.startsWith('https://') || normalized.startsWith('data:image/')) {
+  if (
+    normalized.startsWith('http://')
+    || normalized.startsWith('https://')
+    || normalized.startsWith('data:image/')
+    || normalized.startsWith('/api/avatars/')
+  ) {
     return normalized;
   }
   return undefined;
@@ -117,6 +123,10 @@ export function OnlinePage() {
 
   const roms = useAppStore((state) => state.roms);
   const refreshRoms = useAppStore((state) => state.refreshRoms);
+  const authStatus = useAuthStore((state) => state.status);
+  const authUser = useAuthStore((state) => state.user);
+  const uploadAccountAvatar = useAuthStore((state) => state.uploadAvatar);
+  const clearAccountAvatar = useAuthStore((state) => state.clearAvatar);
 
   const [hostName, setHostName] = useState('Player 1');
   const [joinName, setJoinName] = useState('Player');
@@ -154,6 +164,14 @@ export function OnlinePage() {
   useEffect(() => {
     let cancelled = false;
     const loadIdentity = async (): Promise<void> => {
+      if (authStatus === 'authenticated' && authUser) {
+        setIdentityName(authUser.username);
+        setIdentityAvatarUrl(authUser.avatarUrl ?? '');
+        setHostName(authUser.username);
+        setJoinName(authUser.username);
+        return;
+      }
+
       try {
         const profile = await getOnlineIdentityProfile();
         if (cancelled) {
@@ -175,7 +193,7 @@ export function OnlinePage() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [authStatus, authUser]);
 
   useEffect(() => {
     let cancelled = false;
@@ -271,6 +289,11 @@ export function OnlinePage() {
   const hasRecentFilters = recentSearch.trim().length > 0 || recentRoleFilter !== 'all';
 
   const onSaveIdentity = async (): Promise<void> => {
+    if (authStatus === 'authenticated' && authUser) {
+      setTransientInfo('Signed-in profile is managed by your account.');
+      return;
+    }
+
     setRecentSessionsWarning(undefined);
     setIdentitySaving(true);
     try {
@@ -424,6 +447,11 @@ export function OnlinePage() {
       const dataUrl = await readFileAsDataUrl(file);
       if (!dataUrl.startsWith('data:image/')) {
         throw new Error('Avatar file format is unsupported.');
+      }
+      if (authStatus === 'authenticated') {
+        await uploadAccountAvatar(dataUrl);
+        setTransientInfo(`Uploaded avatar from ${file.name}.`);
+        return;
       }
       setIdentityAvatarUrl(dataUrl);
       setTransientInfo(`Loaded avatar from ${file.name}. Save profile to keep it.`);
@@ -657,7 +685,11 @@ export function OnlinePage() {
           <OnlineAvatar name={identityName} avatarUrl={identityAvatarUrl} className="online-avatar-preview" />
           <div>
             <p className="online-identity-name">{normalizePlayerName(identityName, 'Player')}</p>
-            <p className="online-subtle">Saved locally on this device.</p>
+            <p className="online-subtle">
+              {authStatus === 'authenticated'
+                ? 'Synced from your account. ROM library and controller profiles still stay local on each device.'
+                : 'Saved locally on this device.'}
+            </p>
           </div>
         </div>
         <div className="online-form-grid">
@@ -669,6 +701,7 @@ export function OnlinePage() {
               onChange={(event) => setIdentityName(event.target.value)}
               maxLength={32}
               placeholder="Paul"
+              disabled={authStatus === 'authenticated'}
             />
           </label>
           <label>
@@ -678,6 +711,7 @@ export function OnlinePage() {
               value={identityAvatarUrl}
               onChange={(event) => setIdentityAvatarUrl(event.target.value)}
               placeholder="https://example.com/avatar.png"
+              disabled={authStatus === 'authenticated'}
             />
           </label>
         </div>
@@ -689,7 +723,11 @@ export function OnlinePage() {
           hidden
         />
         <div className="wizard-actions online-identity-actions">
-          <button type="button" onClick={() => void onSaveIdentity()} disabled={identitySaving}>
+          <button
+            type="button"
+            onClick={() => void onSaveIdentity()}
+            disabled={identitySaving || authStatus === 'authenticated'}
+          >
             {identitySaving ? 'Saving…' : 'Save Profile'}
           </button>
           <button
@@ -699,7 +737,20 @@ export function OnlinePage() {
           >
             {avatarUploadBusy ? 'Loading Avatar…' : 'Upload Avatar'}
           </button>
-          <button type="button" onClick={() => setIdentityAvatarUrl('')} disabled={identitySaving || identityAvatarUrl.length === 0}>
+          <button
+            type="button"
+            onClick={() => {
+              if (authStatus === 'authenticated') {
+                void clearAccountAvatar().catch((clearError) => {
+                  const message = clearError instanceof Error ? clearError.message : 'Could not clear account avatar.';
+                  setRecentSessionsWarning(message);
+                });
+                return;
+              }
+              setIdentityAvatarUrl('');
+            }}
+            disabled={identitySaving || identityAvatarUrl.length === 0}
+          >
             Clear Avatar
           </button>
           <button

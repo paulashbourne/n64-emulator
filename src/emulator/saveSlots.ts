@@ -65,7 +65,7 @@ export function normalizeSlotName(value: string | undefined): string {
   return normalized.slice(0, 48);
 }
 
-export function resolveSaveGameIdentity(rom: Pick<RomRecord, 'title' | 'relativePath'>): SaveGameIdentity {
+export function resolveSaveGameIdentity(rom: Pick<RomRecord, 'title' | 'relativePath' | 'hash'>): SaveGameIdentity {
   const cover = matchRomCoverArt(rom);
   if (cover) {
     const normalized = normalizeCoverTitle(cover.title);
@@ -74,6 +74,7 @@ export function resolveSaveGameIdentity(rom: Pick<RomRecord, 'title' | 'relative
       gameKey: key,
       displayTitle: cover.title,
       normalizedTitle: normalized,
+      romHash: rom.hash,
       source: 'cover',
     };
   }
@@ -86,6 +87,7 @@ export function resolveSaveGameIdentity(rom: Pick<RomRecord, 'title' | 'relative
     gameKey: key,
     displayTitle: fallbackTitle,
     normalizedTitle: normalized,
+    romHash: rom.hash,
     source: 'rom_title',
   };
 }
@@ -120,6 +122,7 @@ export async function createSaveSlot(
     slotId: options?.slotId ?? createSlotId(),
     gameKey: identity.gameKey,
     gameTitle: identity.displayTitle,
+    romHash: identity.romHash,
     slotName: normalizeSlotName(options?.slotName),
     createdAt,
     updatedAt: createdAt,
@@ -143,8 +146,24 @@ export async function chooseBootSaveSlot(
     requestedSlotId?: string;
   },
 ): Promise<{ activeSlot: SaveSlotRecord; slots: SaveSlotRecord[] }> {
-  const slots = await listSaveSlotsForGame(identity.gameKey);
+  let slots = await listSaveSlotsForGame(identity.gameKey);
   const requestedSlotId = options?.requestedSlotId?.trim();
+
+  const missingRomHashSlotIds = slots
+    .filter((slot) => typeof slot.romHash !== 'string' || slot.romHash.trim().length === 0 || slot.romHash === 'unknown')
+    .map((slot) => slot.slotId);
+  if (missingRomHashSlotIds.length > 0) {
+    const timestamp = now();
+    await Promise.all(
+      missingRomHashSlotIds.map((slotId) =>
+        db.saveSlots.update(slotId, {
+          romHash: identity.romHash,
+          updatedAt: timestamp,
+        }),
+      ),
+    );
+    slots = await listSaveSlotsForGame(identity.gameKey);
+  }
 
   if (slots.length === 0) {
     const created = await createSaveSlot(identity, { slotName: DEFAULT_SLOT_NAME });
@@ -206,7 +225,10 @@ export async function touchSaveSlot(slotId: string): Promise<void> {
 }
 
 export async function deleteSaveSlot(slotId: string): Promise<void> {
-  await db.saveSlots.delete(slotId);
+  await Promise.all([
+    db.saveSlots.delete(slotId),
+    db.saveSlotBlobs.delete(slotId),
+  ]);
 }
 
 export async function deleteSaveSlotsForGame(gameKey: string): Promise<number> {
@@ -214,7 +236,11 @@ export async function deleteSaveSlotsForGame(gameKey: string): Promise<number> {
   if (slots.length === 0) {
     return 0;
   }
-  await db.saveSlots.bulkDelete(slots.map((slot) => slot.slotId));
+  const slotIds = slots.map((slot) => slot.slotId);
+  await Promise.all([
+    db.saveSlots.bulkDelete(slotIds),
+    db.saveSlotBlobs.bulkDelete(slotIds),
+  ]);
   return slots.length;
 }
 

@@ -16,6 +16,14 @@ export interface SaveRecord {
   updatedAt: number;
 }
 
+export interface SaveSlotBlobRecord {
+  slotId: string;
+  romHash: string;
+  data: ArrayBuffer;
+  updatedAt: number;
+  lastUploadedAt?: number;
+}
+
 export interface AppSettingRecord {
   key: string;
   value: string;
@@ -30,6 +38,7 @@ class AppDatabase extends Dexie {
   profiles!: Table<ControllerProfile, string>;
   saves!: Table<SaveRecord, string>;
   saveSlots!: Table<SaveSlotRecord, string>;
+  saveSlotBlobs!: Table<SaveSlotBlobRecord, string>;
   settings!: Table<AppSettingRecord, string>;
 
   constructor() {
@@ -73,9 +82,32 @@ class AppDatabase extends Dexie {
       directories: '&id,name,lastIndexedAt',
       profiles: '&profileId,deviceId,romHash,updatedAt',
       saves: '&key,romHash,updatedAt',
-      saveSlots: '&slotId,gameKey,updatedAt,lastSavedAt,lastPlayedAt',
+      saveSlots: '&slotId,gameKey,romHash,updatedAt,lastSavedAt,lastPlayedAt',
       settings: '&key,updatedAt',
     });
+
+    this.version(4)
+      .stores({
+        roms: '&id,hash,title,lastPlayed,directoryId,source,favorite',
+        romHandles: '&id,romId,directoryId,relativePath',
+        romBinaries: '&romId,updatedAt',
+        directories: '&id,name,lastIndexedAt',
+        profiles: '&profileId,deviceId,romHash,updatedAt',
+        saves: '&key,romHash,updatedAt',
+        saveSlots: '&slotId,gameKey,romHash,updatedAt,lastSavedAt,lastPlayedAt',
+        saveSlotBlobs: '&slotId,romHash,updatedAt,lastUploadedAt',
+        settings: '&key,updatedAt',
+      })
+      .upgrade(async (transaction) => {
+        await transaction
+          .table('saveSlots')
+          .toCollection()
+          .modify((slot: { romHash?: string }) => {
+            if (typeof slot.romHash !== 'string' || slot.romHash.trim().length === 0) {
+              slot.romHash = 'unknown';
+            }
+          });
+      });
   }
 }
 
@@ -84,7 +116,7 @@ export const db = new AppDatabase();
 export async function clearIndexedData(): Promise<void> {
   await db.transaction(
     'rw',
-    [db.roms, db.romHandles, db.romBinaries, db.directories, db.profiles, db.saves, db.saveSlots, db.settings],
+    [db.roms, db.romHandles, db.romBinaries, db.directories, db.profiles, db.saves, db.saveSlots, db.saveSlotBlobs, db.settings],
     async () => {
       await db.roms.clear();
       await db.romHandles.clear();
@@ -93,6 +125,7 @@ export async function clearIndexedData(): Promise<void> {
       await db.profiles.clear();
       await db.saves.clear();
       await db.saveSlots.clear();
+      await db.saveSlotBlobs.clear();
       await db.settings.clear();
     },
   );

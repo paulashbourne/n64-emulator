@@ -21,10 +21,12 @@ describe('save slots', () => {
   test('resolves shared game identity for known cover aliases', () => {
     const left = resolveSaveGameIdentity({
       title: 'SUPER MARIO 64',
+      hash: 'hash-mario-left',
     });
     const right = resolveSaveGameIdentity({
       title: 'Super Mario 64 (USA)',
       relativePath: 'Roms/Super Mario 64 (USA).z64',
+      hash: 'hash-mario-right',
     });
 
     expect(left.gameKey).toBe(right.gameKey);
@@ -35,6 +37,7 @@ describe('save slots', () => {
   test('creates default boot slot when no slot exists', async () => {
     const identity = resolveSaveGameIdentity({
       title: 'Mystery Game',
+      hash: 'hash-mystery',
     });
 
     const result = await chooseBootSaveSlot(identity);
@@ -45,6 +48,7 @@ describe('save slots', () => {
   test('tracks save and played timestamps per slot', async () => {
     const identity = resolveSaveGameIdentity({
       title: 'Diddy Kong Racing',
+      hash: 'hash-dkr',
     });
     const slot = await createSaveSlot(identity, { slotName: 'Profile A' });
 
@@ -65,6 +69,7 @@ describe('save slots', () => {
   test('summaries reflect primary slot and slot counts', async () => {
     const identity = resolveSaveGameIdentity({
       title: 'Banjo-Kazooie',
+      hash: 'hash-banjo',
     });
 
     const slotA = await createSaveSlot(identity, { slotName: 'Main Save' });
@@ -83,6 +88,7 @@ describe('save slots', () => {
   test('deletes all slots for a game', async () => {
     const identity = resolveSaveGameIdentity({
       title: 'GoldenEye',
+      hash: 'hash-goldeneye',
     });
     await createSaveSlot(identity, { slotName: 'Main Save' });
     await createSaveSlot(identity, { slotName: 'Second Slot' });

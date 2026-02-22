@@ -1,5 +1,7 @@
-import { Suspense, lazy } from 'react';
+import { Suspense, lazy, useEffect } from 'react';
 import { Link, NavLink, Route, Routes, useLocation } from 'react-router-dom';
+
+import { useAuthStore } from './state/authStore';
 
 const LibraryPage = lazy(async () => {
   const module = await import('./pages/LibraryPage');
@@ -26,10 +28,28 @@ const SettingsPage = lazy(async () => {
   return { default: module.SettingsPage };
 });
 
+const LoginPage = lazy(async () => {
+  const module = await import('./pages/LoginPage');
+  return { default: module.LoginPage };
+});
+
+const SignupPage = lazy(async () => {
+  const module = await import('./pages/SignupPage');
+  return { default: module.SignupPage };
+});
+
 function App() {
   const location = useLocation();
   const isPlayRoute = location.pathname.startsWith('/play/');
   const isOnlineSessionRoute = location.pathname.startsWith('/online/session/');
+  const authStatus = useAuthStore((state) => state.status);
+  const user = useAuthStore((state) => state.user);
+  const bootstrapAuth = useAuthStore((state) => state.bootstrapAuth);
+  const logoutUser = useAuthStore((state) => state.logoutUser);
+
+  useEffect(() => {
+    void bootstrapAuth();
+  }, [bootstrapAuth]);
 
   return (
     <div
@@ -48,6 +68,20 @@ function App() {
             </NavLink>
             <NavLink to="/online">Online</NavLink>
             <NavLink to="/settings">Settings</NavLink>
+            {authStatus === 'guest' ? (
+              <>
+                <NavLink to="/login">Log In</NavLink>
+                <NavLink to="/signup">Sign Up</NavLink>
+              </>
+            ) : null}
+            {authStatus === 'authenticated' && user ? (
+              <>
+                <span className="status-pill">{user.username}</span>
+                <button type="button" className="app-header-nav-button" onClick={() => void logoutUser()}>
+                  Log Out
+                </button>
+              </>
+            ) : null}
           </nav>
         </header>
       ) : null}
@@ -60,6 +94,8 @@ function App() {
             <Route path="/online/session/:code" element={<OnlineSessionPage />} />
             <Route path="/play/:romId" element={<PlayPage />} />
             <Route path="/settings" element={<SettingsPage />} />
+            <Route path="/login" element={<LoginPage />} />
+            <Route path="/signup" element={<SignupPage />} />
           </Routes>
         </Suspense>
       </main>

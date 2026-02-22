@@ -236,7 +236,12 @@ function normalizeAvatarUrl(value: unknown): string | undefined {
   if (!normalized) {
     return undefined;
   }
-  if (normalized.startsWith('http://') || normalized.startsWith('https://') || normalized.startsWith('data:image/')) {
+  if (
+    normalized.startsWith('http://')
+    || normalized.startsWith('https://')
+    || normalized.startsWith('data:image/')
+    || normalized.startsWith('/api/avatars/')
+  ) {
     return normalized;
   }
   return undefined;

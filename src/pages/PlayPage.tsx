@@ -5,6 +5,11 @@ import { Link, NavLink, useNavigate, useParams, useSearchParams } from 'react-ro
 import { ControllerWizard } from '../components/ControllerWizard';
 import { InSessionSettingsModal } from '../components/InSessionSettingsModal';
 import { VirtualController } from '../components/VirtualController';
+import {
+  deleteSlotSaveEverywhere,
+  persistRuntimeSaveForSlot,
+  reconcileSlotSaveWithCloud,
+} from '../emulator/cloudSaveSync';
 import { applyProfileToRunningEmulator, controllerProfileToEmulatorJsControls } from '../emulator/emulatorJsControls';
 import {
   buildEmulatorGameId,
@@ -44,6 +49,7 @@ import {
   setPreferredBootMode,
 } from '../storage/appSettings';
 import { useAppStore } from '../state/appStore';
+import { useAuthStore } from '../state/authStore';
 import type { ControllerProfile, N64ControlTarget } from '../types/input';
 import type {
   HostStreamQualityPresetHint,
@@ -612,6 +618,7 @@ export function PlayPage() {
   const activeProfileId = useAppStore((state) => state.activeProfileId);
   const emulatorWarning = useAppStore((state) => state.emulatorWarning);
   const setEmulatorWarning = useAppStore((state) => state.setEmulatorWarning);
+  const isAuthenticated = useAuthStore((state) => state.status === 'authenticated');
 
   const decodedRomId = romId ? decodeURIComponent(romId) : undefined;
   const requestedSaveSlotId = (searchParams.get('saveSlot') ?? '').trim();
@@ -2434,11 +2441,36 @@ export function PlayPage() {
           markLastPlayed(selectedRom.id),
           markSaveSlotPlayed(activeSlot.slotId),
         ]);
-        const refreshedSlots = await listSaveSlotsForGame(identity.gameKey);
+        let refreshedSlots = await listSaveSlotsForGame(identity.gameKey);
         setSaveSlots(refreshedSlots);
         setActiveSaveSlotId(activeSlot.slotId);
-        const refreshedActive = refreshedSlots.find((slot) => slot.slotId === activeSlot.slotId);
+        let refreshedActive = refreshedSlots.find((slot) => slot.slotId === activeSlot.slotId);
+
+        let restoredSyncedData = false;
         if (refreshedActive) {
+          try {
+            const reconciliation = await reconcileSlotSaveWithCloud({
+              slot: refreshedActive,
+              authenticated: isAuthenticated,
+            });
+            if (reconciliation.bytesToApply && reconciliation.bytesToApply.byteLength > 0) {
+              const restored = writeRuntimeSaveBytes(reconciliation.bytesToApply);
+              if (restored) {
+                await markSaveSlotSaved(refreshedActive.slotId);
+                refreshedSlots = await listSaveSlotsForGame(identity.gameKey);
+                setSaveSlots(refreshedSlots);
+                refreshedActive = refreshedSlots.find((slot) => slot.slotId === refreshedActive?.slotId);
+                setSaveActivityMessage('Restored synced save data for this slot.');
+                restoredSyncedData = true;
+              }
+            }
+          } catch (syncError) {
+            const message = syncError instanceof Error ? syncError.message : 'Cloud save sync unavailable.';
+            console.warn(`Cloud save reconcile failed: ${message}`);
+          }
+        }
+
+        if (refreshedActive && !restoredSyncedData) {
           setSaveActivityMessage(`Autosave slot: ${refreshedActive.slotName}`);
         }
 
@@ -2468,7 +2500,7 @@ export function PlayPage() {
       stopEmulatorJs(PLAYER_SELECTOR);
       revokeRomBlobUrl(romBlobUrlRef);
     };
-  }, [bootMode, bootModeLoaded, bootNonce, decodedRomId, loadProfiles, markLastPlayed, requestedSaveSlotId]);
+  }, [bootMode, bootModeLoaded, bootNonce, decodedRomId, isAuthenticated, loadProfiles, markLastPlayed, requestedSaveSlotId]);
 
   useEffect(() => {
     if (!activeProfile || status === 'error') {
@@ -3066,13 +3098,24 @@ export function PlayPage() {
 
   const persistRuntimeSaveMetadata = useCallback(
     async (showToast: boolean): Promise<boolean> => {
-      if (!activeSaveSlotId || !saveGameIdentity) {
+      if (!activeSaveSlotId || !saveGameIdentity || !activeSaveSlot) {
         return false;
       }
 
       const bytes = runtimeSaveBytes();
       if (!bytes || bytes.byteLength === 0) {
         return false;
+      }
+
+      try {
+        await persistRuntimeSaveForSlot({
+          slot: activeSaveSlot,
+          bytes,
+          authenticated: isAuthenticated,
+        });
+      } catch (syncError) {
+        const message = syncError instanceof Error ? syncError.message : 'Cloud save sync unavailable.';
+        console.warn(`Cloud save upload failed: ${message}`);
       }
 
       await markSaveSlotSaved(activeSaveSlotId);
@@ -3085,7 +3128,7 @@ export function PlayPage() {
       }
       return true;
     },
-    [activeSaveSlotId, refreshCurrentSaveSlots, saveGameIdentity],
+    [activeSaveSlot, activeSaveSlotId, isAuthenticated, refreshCurrentSaveSlots, saveGameIdentity],
   );
 
   const onSaveNow = async (): Promise<void> => {
@@ -3153,6 +3196,15 @@ export function PlayPage() {
     }
 
     const remainingSlots = saveSlots.filter((slot) => slot.slotId !== activeSaveSlot.slotId);
+    try {
+      await deleteSlotSaveEverywhere({
+        slot: activeSaveSlot,
+        authenticated: isAuthenticated,
+      });
+    } catch (syncError) {
+      const message = syncError instanceof Error ? syncError.message : 'Cloud save cleanup unavailable.';
+      console.warn(`Cloud save cleanup failed: ${message}`);
+    }
     if (remainingSlots.length === 0) {
       const replacement = await createSaveSlot(saveGameIdentity, {
         slotName: activeSaveSlot.slotName,
@@ -3170,7 +3222,7 @@ export function PlayPage() {
   };
 
   const onResetActiveSave = async (): Promise<void> => {
-    if (!activeSaveSlotId) {
+    if (!activeSaveSlotId || !activeSaveSlot) {
       return;
     }
     const confirmed = window.confirm('Reset active save data to a clean state?');
@@ -3179,6 +3231,15 @@ export function PlayPage() {
     }
 
     const cleared = clearRuntimeSaveBytes();
+    try {
+      await deleteSlotSaveEverywhere({
+        slot: activeSaveSlot,
+        authenticated: isAuthenticated,
+      });
+    } catch (syncError) {
+      const message = syncError instanceof Error ? syncError.message : 'Cloud save cleanup unavailable.';
+      console.warn(`Cloud save cleanup failed: ${message}`);
+    }
     await clearSaveSlotProgress(activeSaveSlotId);
     await refreshCurrentSaveSlots();
     setSaveActivityMessage(cleared ? 'Reset active save state.' : 'Reset slot metadata. Runtime save file was unavailable.');
@@ -3209,10 +3270,7 @@ export function PlayPage() {
     anchor.remove();
     URL.revokeObjectURL(url);
 
-    if (activeSaveSlotId) {
-      await markSaveSlotSaved(activeSaveSlotId);
-      await refreshCurrentSaveSlots();
-    }
+    await persistRuntimeSaveMetadata(false);
     setSaveActivityMessage('Exported active save file.');
   };
 
@@ -3234,7 +3292,7 @@ export function PlayPage() {
       return;
     }
 
-    await markSaveSlotSaved(activeSaveSlotId);
+    await persistRuntimeSaveMetadata(false);
     await touchSaveSlot(activeSaveSlotId);
     await refreshCurrentSaveSlots();
     setSaveActivityMessage(`Imported save file "${file.name}".`);

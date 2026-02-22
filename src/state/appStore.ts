@@ -2,11 +2,6 @@ import { create } from 'zustand';
 
 import { createKeyboardPresetBindings } from '../input/mappingWizard';
 import {
-  deleteSharedControllerProfile,
-  listSharedControllerProfiles,
-  upsertSharedControllerProfiles,
-} from '../online/multiplayerApi';
-import {
   getPreferredFavoritesOnly,
   getPreferredLibrarySortMode,
   setPreferredFavoritesOnly,
@@ -247,61 +242,6 @@ function normalizeGlobalProfile(profile: ControllerProfile): ControllerProfile {
   };
 }
 
-function normalizeBindingForComparison(binding: InputBinding): Record<string, string | number> {
-  const normalized: Record<string, string | number> = {
-    source: binding.source,
-  };
-
-  if (typeof binding.code === 'string') {
-    normalized.code = binding.code;
-  }
-  if (typeof binding.index === 'number') {
-    normalized.index = binding.index;
-  }
-  if (typeof binding.gamepadIndex === 'number') {
-    normalized.gamepadIndex = binding.gamepadIndex;
-  }
-  if (typeof binding.deviceId === 'string') {
-    normalized.deviceId = binding.deviceId;
-  }
-  if (binding.direction === 'negative' || binding.direction === 'positive') {
-    normalized.direction = binding.direction;
-  }
-  if (typeof binding.threshold === 'number') {
-    normalized.threshold = binding.threshold;
-  }
-  if (typeof binding.axisValue === 'number') {
-    normalized.axisValue = binding.axisValue;
-  }
-  if (typeof binding.axisTolerance === 'number') {
-    normalized.axisTolerance = binding.axisTolerance;
-  }
-
-  return normalized;
-}
-
-function profileMappingSignature(profile: ControllerProfile): string {
-  const normalizedBindings: Array<[string, Record<string, string | number>]> = [];
-  for (const [target, binding] of Object.entries(profile.bindings)) {
-    if (!binding) {
-      continue;
-    }
-    normalizedBindings.push([target, normalizeBindingForComparison(binding)]);
-  }
-  normalizedBindings.sort((left, right) => left[0].localeCompare(right[0]));
-
-  return JSON.stringify({
-    name: profile.name,
-    deviceId: profile.deviceId,
-    deadzone: profile.deadzone,
-    bindings: normalizedBindings,
-  });
-}
-
-function profilesHaveSameMappings(left: ControllerProfile, right: ControllerProfile): boolean {
-  return profileMappingSignature(left) === profileMappingSignature(right);
-}
-
 function resolveActiveProfileId(profiles: ControllerProfile[], preferredProfileId?: string): string | undefined {
   if (preferredProfileId && profiles.some((profile) => profile.profileId === preferredProfileId)) {
     return preferredProfileId;
@@ -318,67 +258,6 @@ async function migrateScopedProfilesToGlobal(): Promise<void> {
   }
 
   await db.profiles.bulkPut(scopedProfiles.map(normalizeGlobalProfile));
-}
-
-async function listLocalGlobalProfiles(): Promise<ControllerProfile[]> {
-  const allProfiles = await db.profiles.toArray();
-  return allProfiles.filter((profile) => profile.romHash === undefined).map(normalizeGlobalProfile);
-}
-
-function toProfileMap(profiles: ControllerProfile[]): Map<string, ControllerProfile> {
-  return new Map(profiles.map((profile) => [profile.profileId, profile]));
-}
-
-async function replaceLocalGlobalProfiles(profiles: ControllerProfile[]): Promise<void> {
-  const allProfiles = await db.profiles.toArray();
-  const globalProfileIds = allProfiles.filter((profile) => profile.romHash === undefined).map((profile) => profile.profileId);
-  if (globalProfileIds.length > 0) {
-    await db.profiles.bulkDelete(globalProfileIds);
-  }
-  if (profiles.length > 0) {
-    await db.profiles.bulkPut(profiles.map(normalizeGlobalProfile));
-  }
-}
-
-async function synchronizeGlobalProfilesFromServer(): Promise<void> {
-  const localGlobalProfiles = await listLocalGlobalProfiles();
-  const localById = toProfileMap(localGlobalProfiles);
-
-  const remoteProfiles = (await listSharedControllerProfiles()).map(normalizeGlobalProfile);
-  const remoteById = toProfileMap(remoteProfiles);
-
-  const profilesToUpload: ControllerProfile[] = [];
-  for (const localProfile of localGlobalProfiles) {
-    const remoteProfile = remoteById.get(localProfile.profileId);
-    if (!remoteProfile || localProfile.updatedAt > remoteProfile.updatedAt) {
-      profilesToUpload.push(localProfile);
-      continue;
-    }
-
-    if (!profilesHaveSameMappings(localProfile, remoteProfile)) {
-      const rebasedLocalProfile: ControllerProfile = {
-        ...localProfile,
-        updatedAt: remoteProfile.updatedAt + 1,
-      };
-      profilesToUpload.push(rebasedLocalProfile);
-      localById.set(rebasedLocalProfile.profileId, rebasedLocalProfile);
-    }
-  }
-
-  let mergedById = new Map(remoteById);
-  if (profilesToUpload.length > 0) {
-    const uploadedProfiles = await upsertSharedControllerProfiles(profilesToUpload);
-    mergedById = toProfileMap(uploadedProfiles.map(normalizeGlobalProfile));
-  } else if (remoteProfiles.length === 0 && localGlobalProfiles.length > 0) {
-    const uploadedProfiles = await upsertSharedControllerProfiles(localGlobalProfiles);
-    mergedById = toProfileMap(uploadedProfiles.map(normalizeGlobalProfile));
-  }
-
-  if (mergedById.size === 0 && localById.size > 0) {
-    mergedById = new Map(localById);
-  }
-
-  await replaceLocalGlobalProfiles([...mergedById.values()]);
 }
 
 async function queryProfiles(romHash?: string): Promise<ControllerProfile[]> {
@@ -557,12 +436,6 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
     await ensureDefaultKeyboardProfile();
     await ensureDefaultGamepadProfiles();
     await migrateScopedProfilesToGlobal();
-    try {
-      await synchronizeGlobalProfilesFromServer();
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown profile sync error.';
-      console.warn(`Controller profile sync unavailable: ${message}`);
-    }
     const profiles = await queryProfiles(romHash);
     const activeProfileId = get().activeProfileId;
 
@@ -581,30 +454,10 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
       profiles: localProfiles,
       activeProfileId: resolveActiveProfileId(localProfiles, normalizedProfile.profileId),
     });
-
-    void (async () => {
-      try {
-        await synchronizeGlobalProfilesFromServer();
-        const syncedProfiles = await queryProfiles();
-        set((state) => ({
-          profiles: syncedProfiles,
-          activeProfileId: resolveActiveProfileId(syncedProfiles, state.activeProfileId ?? normalizedProfile.profileId),
-        }));
-      } catch (error) {
-        const message = error instanceof Error ? error.message : 'Unknown profile sync error.';
-        console.warn(`Unable to persist profile to shared store: ${message}`);
-      }
-    })();
   },
 
   removeProfile: async (profileId: string) => {
     await db.profiles.delete(profileId);
-    try {
-      await deleteSharedControllerProfile(profileId);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown profile sync error.';
-      console.warn(`Unable to delete profile from shared store: ${message}`);
-    }
     await get().loadProfiles();
   },
 
