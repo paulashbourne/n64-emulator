@@ -1,4 +1,6 @@
-import { lazy, Suspense, useEffect } from 'react';
+import { lazy, Suspense, useEffect, useRef } from 'react';
+
+import { useFocusTrap } from './useFocusTrap';
 
 const SettingsPage = lazy(async () => {
   const module = await import('../pages/SettingsPage');
@@ -11,6 +13,9 @@ interface InSessionSettingsModalProps {
 }
 
 export function InSessionSettingsModal({ onClose, title = 'Settings' }: InSessionSettingsModalProps) {
+  const panelRef = useRef<HTMLElement | null>(null);
+  useFocusTrap(panelRef, true);
+
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.code !== 'Escape') {
@@ -29,6 +34,7 @@ export function InSessionSettingsModal({ onClose, title = 'Settings' }: InSessio
   return (
     <div className="in-session-settings-backdrop" role="presentation" onClick={onClose}>
       <section
+        ref={panelRef}
         className="panel in-session-settings-panel"
         role="dialog"
         aria-modal="true"

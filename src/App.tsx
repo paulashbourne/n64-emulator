@@ -1,7 +1,10 @@
 import { Suspense, lazy, useEffect } from 'react';
 import { Link, NavLink, Route, Routes, useLocation } from 'react-router-dom';
 
+import { NotificationCenter } from './components/NotificationCenter';
+import { UX_FEEDBACK_V2_ENABLED, UX_PREF_SYNC_V1_ENABLED } from './config/uxFlags';
 import { useAuthStore } from './state/authStore';
+import { usePreferencesStore } from './state/preferencesStore';
 
 const LibraryPage = lazy(async () => {
   const module = await import('./pages/LibraryPage');
@@ -38,6 +41,41 @@ const SignupPage = lazy(async () => {
   return { default: module.SignupPage };
 });
 
+function prefetchRouteModules(pathname: string): void {
+  const schedule = (task: () => Promise<unknown>): void => {
+    const run = () => {
+      void task().catch(() => {
+        // Prefetch failures are non-critical.
+      });
+    };
+
+    if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
+      const idleCallback = window.requestIdleCallback as (callback: IdleRequestCallback) => number;
+      idleCallback(() => run());
+      return;
+    }
+    globalThis.setTimeout(run, 180);
+  };
+
+  if (pathname === '/') {
+    schedule(() => import('./pages/PlayPage'));
+    schedule(() => import('./pages/OnlinePage'));
+    return;
+  }
+  if (pathname === '/online') {
+    schedule(() => import('./pages/OnlineSessionPage'));
+    schedule(() => import('./pages/PlayPage'));
+    return;
+  }
+  if (pathname.startsWith('/online/session/')) {
+    schedule(() => import('./pages/PlayPage'));
+    return;
+  }
+  if (pathname.startsWith('/play/')) {
+    schedule(() => import('./pages/OnlineSessionPage'));
+  }
+}
+
 function App() {
   const location = useLocation();
   const isPlayRoute = location.pathname.startsWith('/play/');
@@ -46,15 +84,30 @@ function App() {
   const user = useAuthStore((state) => state.user);
   const bootstrapAuth = useAuthStore((state) => state.bootstrapAuth);
   const logoutUser = useAuthStore((state) => state.logoutUser);
+  const hydratePreferences = usePreferencesStore((state) => state.hydrateLocal);
+
+  useEffect(() => {
+    if (!UX_PREF_SYNC_V1_ENABLED) {
+      return;
+    }
+    hydratePreferences();
+  }, [hydratePreferences]);
 
   useEffect(() => {
     void bootstrapAuth();
   }, [bootstrapAuth]);
 
+  useEffect(() => {
+    prefetchRouteModules(location.pathname);
+  }, [location.pathname]);
+
   return (
     <div
       className={`app-shell ${isPlayRoute ? 'app-shell-play' : ''} ${isOnlineSessionRoute ? 'app-shell-online-session' : ''}`}
     >
+      <a href="#app-main-content" className="skip-link">
+        Skip to main content
+      </a>
       {!isPlayRoute ? (
         <header className="app-header">
           <Link to="/" className="app-header-brand app-brand-link" aria-label="WarpDeck 64 library home">
@@ -86,7 +139,9 @@ function App() {
         </header>
       ) : null}
 
-      <main className={isPlayRoute ? 'app-main-play' : undefined}>
+      {UX_FEEDBACK_V2_ENABLED ? <NotificationCenter /> : null}
+
+      <main id="app-main-content" className={isPlayRoute ? 'app-main-play' : undefined}>
         <Suspense fallback={<section className="panel app-loading-panel">Loading…</section>}>
           <Routes>
             <Route path="/" element={<LibraryPage />} />

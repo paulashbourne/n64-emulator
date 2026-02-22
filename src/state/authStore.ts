@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 
 import { backfillCloudSavesFromLocal } from '../emulator/cloudSaveSync';
+import { UX_PREF_SYNC_V1_ENABLED } from '../config/uxFlags';
 import {
   deleteCurrentUserAvatar,
   getCurrentUser,
@@ -10,6 +11,7 @@ import {
   updateCurrentUserCountry,
   uploadCurrentUserAvatar,
 } from '../online/authApi';
+import { usePreferencesStore } from './preferencesStore';
 import type { AuthenticatedUser, AuthStatus } from '../types/auth';
 
 interface AuthStoreState {
@@ -44,17 +46,31 @@ export const useAuthStore = create<AuthStoreState>((set) => ({
       try {
         const user = await getCurrentUser();
         if (user) {
+          const preferencesStore = usePreferencesStore.getState();
+          if (UX_PREF_SYNC_V1_ENABLED) {
+            preferencesStore.setAuthenticated(true);
+            preferencesStore.hydrateLocal();
+          }
           set({
             status: 'authenticated',
             user,
             initialized: true,
             authError: undefined,
           });
+          if (UX_PREF_SYNC_V1_ENABLED) {
+            void preferencesStore.pullFromCloud().catch((error) => {
+              const message = error instanceof Error ? error.message : 'Preference sync failed.';
+              console.warn(`Preference sync unavailable: ${message}`);
+            });
+          }
           void backfillCloudSavesFromLocal(true).catch((error) => {
             const message = error instanceof Error ? error.message : 'Cloud save backfill failed.';
             console.warn(`Cloud backfill unavailable: ${message}`);
           });
           return;
+        }
+        if (UX_PREF_SYNC_V1_ENABLED) {
+          usePreferencesStore.getState().setAuthenticated(false);
         }
         set({
           status: 'guest',
@@ -81,12 +97,23 @@ export const useAuthStore = create<AuthStoreState>((set) => ({
   signupWithPassword: async ({ email, username, password }) => {
     set({ authError: undefined });
     const user = await signup({ email, username, password });
+    const preferencesStore = usePreferencesStore.getState();
+    if (UX_PREF_SYNC_V1_ENABLED) {
+      preferencesStore.setAuthenticated(true);
+      preferencesStore.hydrateLocal();
+    }
     set({
       status: 'authenticated',
       user,
       initialized: true,
       authError: undefined,
     });
+    if (UX_PREF_SYNC_V1_ENABLED) {
+      void preferencesStore.pullFromCloud().catch((error) => {
+        const message = error instanceof Error ? error.message : 'Preference sync failed.';
+        console.warn(`Preference sync unavailable: ${message}`);
+      });
+    }
     void backfillCloudSavesFromLocal(true).catch((error) => {
       const message = error instanceof Error ? error.message : 'Cloud save backfill failed.';
       console.warn(`Cloud backfill unavailable: ${message}`);
@@ -96,12 +123,23 @@ export const useAuthStore = create<AuthStoreState>((set) => ({
   loginWithPassword: async ({ username, password }) => {
     set({ authError: undefined });
     const user = await login({ username, password });
+    const preferencesStore = usePreferencesStore.getState();
+    if (UX_PREF_SYNC_V1_ENABLED) {
+      preferencesStore.setAuthenticated(true);
+      preferencesStore.hydrateLocal();
+    }
     set({
       status: 'authenticated',
       user,
       initialized: true,
       authError: undefined,
     });
+    if (UX_PREF_SYNC_V1_ENABLED) {
+      void preferencesStore.pullFromCloud().catch((error) => {
+        const message = error instanceof Error ? error.message : 'Preference sync failed.';
+        console.warn(`Preference sync unavailable: ${message}`);
+      });
+    }
     void backfillCloudSavesFromLocal(true).catch((error) => {
       const message = error instanceof Error ? error.message : 'Cloud save backfill failed.';
       console.warn(`Cloud backfill unavailable: ${message}`);
@@ -112,6 +150,9 @@ export const useAuthStore = create<AuthStoreState>((set) => ({
     try {
       await logout();
     } finally {
+      if (UX_PREF_SYNC_V1_ENABLED) {
+        usePreferencesStore.getState().setAuthenticated(false);
+      }
       set({
         status: 'guest',
         user: undefined,

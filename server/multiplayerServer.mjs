@@ -20,6 +20,7 @@ const CONTROLLER_PROFILE_STORE_PATH =
 const AUTH_USER_STORE_PATH = process.env.AUTH_USER_STORE_PATH ?? './.runtime/users.json';
 const AUTH_SESSION_STORE_PATH = process.env.AUTH_SESSION_STORE_PATH ?? './.runtime/sessions.json';
 const CLOUD_SAVE_STORE_PATH = process.env.CLOUD_SAVE_STORE_PATH ?? './.runtime/cloud-saves.json';
+const AUTH_PREFERENCE_STORE_PATH = process.env.AUTH_PREFERENCE_STORE_PATH ?? './.runtime/user-preferences.json';
 const AUTH_AVATAR_DIR = process.env.AUTH_AVATAR_DIR ?? './.runtime/avatars';
 const AUTH_SESSION_TTL_MS = Number(process.env.AUTH_SESSION_TTL_MS ?? 2_592_000_000);
 const AUTH_PASSWORD_MIN_LENGTH = Number(process.env.AUTH_PASSWORD_MIN_LENGTH ?? 8);
@@ -106,6 +107,43 @@ const INPUT_SOURCES = new Set(['keyboard', 'gamepad_button', 'gamepad_axis']);
 
 /**
  * @typedef {{
+ *   userId: string;
+ *   preferences: {
+ *     onboarding: {
+ *       steps: {
+ *         import_rom: boolean;
+ *         launch_game: boolean;
+ *         verify_controls: boolean;
+ *         online_session: boolean;
+ *       };
+ *       dismissedAt?: number;
+ *       updatedAt: number;
+ *     };
+ *     online: {
+ *       guestFocusMode?: boolean;
+ *       showVirtualController?: boolean;
+ *       guestInputRelayMode?: 'auto' | 'responsive' | 'balanced' | 'conservative';
+ *       hostControlsCollapsed?: boolean;
+ *       hostChatCollapsed?: boolean;
+ *     };
+ *     play: {
+ *       autoHideHudWhileRunning?: boolean;
+ *       activeMenuTab?: 'gameplay' | 'saves' | 'controls' | 'online';
+ *       showOnlineAdvancedTools?: boolean;
+ *     };
+ *     profile: {
+ *       displayName?: string;
+ *       avatarUrl?: string;
+ *       country?: string;
+ *     };
+ *     updatedAt: number;
+ *   };
+ *   updatedAt: number;
+ * }} UserPreferenceRecord
+ */
+
+/**
+ * @typedef {{
  *   clientId: string;
  *   name: string;
  *   avatarUrl?: string;
@@ -181,12 +219,15 @@ const authUserIdByEmailLower = new Map();
 const authSessions = new Map();
 /** @type {Map<string, CloudSaveRecord>} */
 const cloudSavesByKey = new Map();
+/** @type {Map<string, UserPreferenceRecord>} */
+const userPreferencesByUserId = new Map();
 /** @type {Map<string, { windowStartedAt: number; attempts: number }>} */
 const authRateLimits = new Map();
 let profileStoreWritePromise = Promise.resolve();
 let authUserStoreWritePromise = Promise.resolve();
 let authSessionStoreWritePromise = Promise.resolve();
 let cloudSaveStoreWritePromise = Promise.resolve();
+let preferenceStoreWritePromise = Promise.resolve();
 
 function resolveCorsOrigin(req) {
   const origin = typeof req.headers.origin === 'string' ? req.headers.origin.trim() : '';
@@ -979,6 +1020,73 @@ async function loadCloudSavesFromDisk() {
   }
 }
 
+async function persistPreferencesToDisk() {
+  const directory = dirname(AUTH_PREFERENCE_STORE_PATH);
+  const payload = JSON.stringify(
+    {
+      updatedAt: now(),
+      preferences: [...userPreferencesByUserId.values()],
+    },
+    null,
+    2,
+  );
+
+  await mkdir(directory, { recursive: true });
+  await writeFile(AUTH_PREFERENCE_STORE_PATH, payload, 'utf8');
+}
+
+async function queuePreferencePersist() {
+  preferenceStoreWritePromise = preferenceStoreWritePromise
+    .then(() => persistPreferencesToDisk())
+    .catch((error) => {
+      console.error(`Failed to persist user preferences at ${AUTH_PREFERENCE_STORE_PATH}:`, error);
+    });
+  await preferenceStoreWritePromise;
+}
+
+function sanitizeLoadedPreferenceRecord(rawPreference) {
+  if (!rawPreference || typeof rawPreference !== 'object') {
+    return null;
+  }
+
+  const userId = typeof rawPreference.userId === 'string' ? rawPreference.userId.trim() : '';
+  if (!userId) {
+    return null;
+  }
+
+  const updatedAt = sanitizePreferenceTimestamp(rawPreference.updatedAt, now());
+  const normalized = sanitizePreferencePayload(rawPreference.preferences ?? rawPreference, undefined);
+  if (!normalized) {
+    return null;
+  }
+
+  return {
+    userId,
+    preferences: normalized,
+    updatedAt: Math.max(updatedAt, normalized.updatedAt),
+  };
+}
+
+async function loadPreferencesFromDisk() {
+  try {
+    const raw = await readFile(AUTH_PREFERENCE_STORE_PATH, 'utf8');
+    const parsed = JSON.parse(raw);
+    const preferences = Array.isArray(parsed?.preferences) ? parsed.preferences : [];
+    for (const rawPreference of preferences) {
+      const sanitized = sanitizeLoadedPreferenceRecord(rawPreference);
+      if (!sanitized) {
+        continue;
+      }
+      userPreferencesByUserId.set(sanitized.userId, sanitized);
+    }
+  } catch (error) {
+    if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') {
+      return;
+    }
+    console.error('Unable to load user preferences:', error);
+  }
+}
+
 function parseControllerProfileId(pathname) {
   const match = pathname.match(/^\/api\/controller-profiles\/(.+)$/);
   if (!match) {
@@ -1019,6 +1127,136 @@ function sanitizeAvatarUrl(value) {
   }
 
   return undefined;
+}
+
+function defaultUserPreferences(updatedAt = now()) {
+  return {
+    onboarding: {
+      steps: {
+        import_rom: false,
+        launch_game: false,
+        verify_controls: false,
+        online_session: false,
+      },
+      updatedAt,
+    },
+    online: {},
+    play: {},
+    profile: {},
+    updatedAt,
+  };
+}
+
+function sanitizePreferenceBoolean(value) {
+  return typeof value === 'boolean' ? value : undefined;
+}
+
+function sanitizePreferenceTimestamp(value, fallback) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.max(0, Math.round(value));
+}
+
+function sanitizePreferenceRelayMode(value) {
+  if (value === 'auto' || value === 'responsive' || value === 'balanced' || value === 'conservative') {
+    return value;
+  }
+  return undefined;
+}
+
+function sanitizePreferencePlayTab(value) {
+  if (value === 'gameplay' || value === 'saves' || value === 'controls' || value === 'online') {
+    return value;
+  }
+  return undefined;
+}
+
+function sanitizePreferenceDisplayName(value) {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+  const clean = value.trim().replace(/\s+/g, ' ').slice(0, 64);
+  return clean || undefined;
+}
+
+function sanitizePreferenceCountry(value) {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+  const normalized = normalizeCountry(value);
+  return normalized === 'Unknown' ? undefined : normalized;
+}
+
+function sanitizePreferencePayload(input, previous) {
+  if (!input || typeof input !== 'object') {
+    return null;
+  }
+  const parsed = input;
+  const current = previous?.preferences ?? defaultUserPreferences();
+  const updatedAt = sanitizePreferenceTimestamp(parsed.updatedAt, now());
+
+  const onboardingInput = parsed.onboarding && typeof parsed.onboarding === 'object' ? parsed.onboarding : {};
+  const onboardingStepsInput =
+    onboardingInput.steps && typeof onboardingInput.steps === 'object' ? onboardingInput.steps : {};
+  const onboarding = {
+    steps: {
+      import_rom:
+        typeof onboardingStepsInput.import_rom === 'boolean'
+          ? onboardingStepsInput.import_rom
+          : current.onboarding.steps.import_rom,
+      launch_game:
+        typeof onboardingStepsInput.launch_game === 'boolean'
+          ? onboardingStepsInput.launch_game
+          : current.onboarding.steps.launch_game,
+      verify_controls:
+        typeof onboardingStepsInput.verify_controls === 'boolean'
+          ? onboardingStepsInput.verify_controls
+          : current.onboarding.steps.verify_controls,
+      online_session:
+        typeof onboardingStepsInput.online_session === 'boolean'
+          ? onboardingStepsInput.online_session
+          : current.onboarding.steps.online_session,
+    },
+    dismissedAt:
+      typeof onboardingInput.dismissedAt === 'number'
+        ? sanitizePreferenceTimestamp(onboardingInput.dismissedAt, updatedAt)
+        : undefined,
+    updatedAt: sanitizePreferenceTimestamp(onboardingInput.updatedAt, updatedAt),
+  };
+
+  const onlineInput = parsed.online && typeof parsed.online === 'object' ? parsed.online : {};
+  const playInput = parsed.play && typeof parsed.play === 'object' ? parsed.play : {};
+  const profileInput = parsed.profile && typeof parsed.profile === 'object' ? parsed.profile : {};
+
+  return {
+    onboarding,
+    online: {
+      guestFocusMode: sanitizePreferenceBoolean(onlineInput.guestFocusMode),
+      showVirtualController: sanitizePreferenceBoolean(onlineInput.showVirtualController),
+      guestInputRelayMode: sanitizePreferenceRelayMode(onlineInput.guestInputRelayMode),
+      hostControlsCollapsed: sanitizePreferenceBoolean(onlineInput.hostControlsCollapsed),
+      hostChatCollapsed: sanitizePreferenceBoolean(onlineInput.hostChatCollapsed),
+    },
+    play: {
+      autoHideHudWhileRunning: sanitizePreferenceBoolean(playInput.autoHideHudWhileRunning),
+      activeMenuTab: sanitizePreferencePlayTab(playInput.activeMenuTab),
+      showOnlineAdvancedTools: sanitizePreferenceBoolean(playInput.showOnlineAdvancedTools),
+    },
+    profile: {
+      displayName: sanitizePreferenceDisplayName(profileInput.displayName),
+      avatarUrl: sanitizeAvatarUrl(profileInput.avatarUrl),
+      country: sanitizePreferenceCountry(profileInput.country),
+    },
+    updatedAt,
+  };
+}
+
+function preferenceRecordForClient(record) {
+  return {
+    preferences: record.preferences,
+    updatedAt: record.updatedAt,
+  };
 }
 
 function sanitizePassword(value) {
@@ -1896,6 +2134,72 @@ const httpServer = createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === 'GET' && pathname === '/api/auth/me/preferences') {
+    const authContext = getAuthenticatedUser(req);
+    if (!authContext) {
+      sendJson(req, res, 401, { error: 'Authentication required.' });
+      return;
+    }
+
+    const existing = userPreferencesByUserId.get(authContext.user.userId) ?? {
+      userId: authContext.user.userId,
+      preferences: defaultUserPreferences(),
+      updatedAt: 0,
+    };
+
+    const refreshed = refreshAuthSession(authContext.session);
+    setAuthCookie(req, res, refreshed.sessionId, refreshed.expiresAt);
+    await queueAuthSessionPersist();
+    sendJson(req, res, 200, preferenceRecordForClient(existing));
+    return;
+  }
+
+  if (req.method === 'PUT' && pathname === '/api/auth/me/preferences') {
+    const authContext = getAuthenticatedUser(req);
+    if (!authContext) {
+      sendJson(req, res, 401, { error: 'Authentication required.' });
+      return;
+    }
+    try {
+      const body = await readJsonBody(req);
+      const source = body?.preferences && typeof body.preferences === 'object'
+        ? body.preferences
+        : body;
+      const normalized = sanitizePreferencePayload(source, undefined);
+      if (!normalized) {
+        sendJson(req, res, 400, { error: 'Preferences payload is invalid.' });
+        return;
+      }
+
+      const existing = userPreferencesByUserId.get(authContext.user.userId);
+      let record = existing;
+      let changed = false;
+      if (!existing || normalized.updatedAt >= existing.updatedAt) {
+        record = {
+          userId: authContext.user.userId,
+          preferences: normalized,
+          updatedAt: normalized.updatedAt,
+        };
+        changed = !existing
+          || existing.updatedAt !== record.updatedAt
+          || JSON.stringify(existing.preferences) !== JSON.stringify(record.preferences);
+        userPreferencesByUserId.set(authContext.user.userId, record);
+      }
+
+      const refreshed = refreshAuthSession(authContext.session);
+      setAuthCookie(req, res, refreshed.sessionId, refreshed.expiresAt);
+      await Promise.all([
+        queueAuthSessionPersist(),
+        changed ? queuePreferencePersist() : Promise.resolve(),
+      ]);
+      sendJson(req, res, 200, preferenceRecordForClient(record));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Invalid preferences payload.';
+      sendJson(req, res, 400, { error: message });
+    }
+    return;
+  }
+
   if (req.method === 'PUT' && pathname === '/api/auth/me/avatar') {
     const authContext = getAuthenticatedUser(req);
     if (!authContext) {
@@ -2451,6 +2755,7 @@ await Promise.all([
   loadUsersFromDisk(),
   loadAuthSessionsFromDisk(),
   loadCloudSavesFromDisk(),
+  loadPreferencesFromDisk(),
 ]);
 
 for (const [sessionId, session] of authSessions.entries()) {
@@ -2465,6 +2770,7 @@ console.log(`Loaded ${sharedControllerProfiles.size} shared controller profile(s
 console.log(`Loaded ${authUsersById.size} auth user(s) from ${AUTH_USER_STORE_PATH}.`);
 console.log(`Loaded ${authSessions.size} auth session(s) from ${AUTH_SESSION_STORE_PATH}.`);
 console.log(`Loaded ${cloudSavesByKey.size} cloud save(s) from ${CLOUD_SAVE_STORE_PATH}.`);
+console.log(`Loaded ${userPreferencesByUserId.size} user preference record(s) from ${AUTH_PREFERENCE_STORE_PATH}.`);
 
 httpServer.listen(PORT, HOST, () => {
   console.log(`Multiplayer coordinator listening at http://${HOST}:${PORT}`);

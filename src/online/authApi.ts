@@ -1,4 +1,5 @@
 import type { AuthenticatedUser, CloudSaveMetadata, CloudSaveRecord } from '../types/auth';
+import type { UserUiPreferences } from '../types/ux';
 
 const REQUEST_TIMEOUT_MS = 12_000;
 
@@ -142,6 +143,38 @@ export async function deleteCurrentUserAvatar(): Promise<AuthenticatedUser> {
   });
   const payload = await parseJsonOrThrow<AuthPayload>(response);
   return payload.user;
+}
+
+export async function getCurrentUserPreferences(): Promise<{
+  preferences: UserUiPreferences;
+  updatedAt: number;
+}> {
+  const response = await fetchWithTimeout(authApiUrl('/api/auth/me/preferences'), {
+    method: 'GET',
+  });
+  return await parseJsonOrThrow<{
+    preferences: UserUiPreferences;
+    updatedAt: number;
+  }>(response);
+}
+
+export async function putCurrentUserPreferences(preferences: UserUiPreferences): Promise<{
+  preferences: UserUiPreferences;
+  updatedAt: number;
+}> {
+  const response = await fetchWithTimeout(authApiUrl('/api/auth/me/preferences'), {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      preferences,
+    }),
+  });
+  return await parseJsonOrThrow<{
+    preferences: UserUiPreferences;
+    updatedAt: number;
+  }>(response);
 }
 
 export async function listCloudSaves(): Promise<CloudSaveMetadata[]> {

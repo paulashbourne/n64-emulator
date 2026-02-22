@@ -15,6 +15,7 @@ import {
   type MappingWizardState,
 } from '../input/mappingWizard';
 import { bindingToLabel, captureNextInput, controlPrompt, isBindingActive } from '../input/inputService';
+import { useFocusTrap } from './useFocusTrap';
 import { CONTROL_LABELS, isAnalogTarget, N64_MAPPING_ORDER } from '../types/input';
 import type { ControllerProfile, InputBinding, N64ControlTarget } from '../types/input';
 
@@ -59,11 +60,13 @@ export function ControllerWizard({
   const lastCapturedBindingRef = useRef<InputBinding | undefined>(undefined);
   const captureInFlightRef = useRef(false);
   const heldKeysRef = useRef<Set<string>>(new Set());
+  const wizardRootRef = useRef<HTMLElement | null>(null);
 
   const target = currentTarget(wizardState);
   const complete = isWizardComplete(wizardState);
   const progress = wizardProgress(wizardState);
   const summary = useMemo(() => mappingSummary(wizardState), [wizardState]);
+  useFocusTrap(wizardRootRef, true);
 
   const readConnectedGamepads = useCallback((): Gamepad[] => {
     if (typeof navigator === 'undefined' || typeof navigator.getGamepads !== 'function') {
@@ -337,7 +340,7 @@ export function ControllerWizard({
   };
 
   return (
-    <section className="panel wizard-panel" aria-label="Controller mapping wizard">
+    <section ref={wizardRootRef} className="panel wizard-panel" aria-label="Controller mapping wizard">
       <header className="wizard-header">
         <h2>{effectiveSaveMode === 'edit' ? 'Edit Controller Profile' : 'Controller Mapping Wizard'}</h2>
         <p>Step through each N64 control and press the input you want to map.</p>
