@@ -26,6 +26,9 @@ const AUTH_PASSWORD_MIN_LENGTH = Number(process.env.AUTH_PASSWORD_MIN_LENGTH ?? 
 const AUTH_SESSION_COOKIE = 'wd64_session';
 const AUTH_RATE_LIMIT_WINDOW_MS = 5 * 60_000;
 const AUTH_RATE_LIMIT_MAX_ATTEMPTS = 20;
+const EDGE_AUTH_COOKIE_NAME = (process.env.BASIC_AUTH_EDGE_COOKIE_NAME ?? '').trim();
+const EDGE_AUTH_COOKIE_TOKEN = (process.env.BASIC_AUTH_EDGE_COOKIE_TOKEN ?? '').trim();
+const EDGE_AUTH_COOKIE_MAX_AGE_SECONDS = Number(process.env.BASIC_AUTH_EDGE_COOKIE_MAX_AGE_SECONDS ?? 31_536_000);
 const MAX_AVATAR_BYTES = 256 * 1024;
 const ALLOWED_AVATAR_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
 const AVATAR_MIME_EXTENSION = {
@@ -294,7 +297,13 @@ function shouldUseSecureCookie(req) {
   const forwardedProto = typeof req.headers['x-forwarded-proto'] === 'string'
     ? req.headers['x-forwarded-proto'].toLowerCase()
     : '';
-  return forwardedProto.includes('https');
+  if (forwardedProto.includes('https')) {
+    return true;
+  }
+  const cloudfrontForwardedProto = typeof req.headers['cloudfront-forwarded-proto'] === 'string'
+    ? req.headers['cloudfront-forwarded-proto'].toLowerCase()
+    : '';
+  return cloudfrontForwardedProto.includes('https');
 }
 
 function appendSetCookieHeader(res, cookie) {
@@ -310,6 +319,28 @@ function appendSetCookieHeader(res, cookie) {
   res.setHeader('Set-Cookie', [String(existing), cookie]);
 }
 
+function setEdgePasswordGateCookie(req, res) {
+  if (!EDGE_AUTH_COOKIE_NAME || !EDGE_AUTH_COOKIE_TOKEN) {
+    return;
+  }
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(EDGE_AUTH_COOKIE_NAME)) {
+    return;
+  }
+  if (!/^[A-Za-z0-9._~-]{1,256}$/.test(EDGE_AUTH_COOKIE_TOKEN)) {
+    return;
+  }
+
+  const configuredMaxAge = Number.isFinite(EDGE_AUTH_COOKIE_MAX_AGE_SECONDS)
+    ? Math.floor(EDGE_AUTH_COOKIE_MAX_AGE_SECONDS)
+    : 31_536_000;
+  const maxAge = Math.max(60, Math.min(31_536_000, configuredMaxAge));
+  const secure = shouldUseSecureCookie(req) ? '; Secure' : '';
+  appendSetCookieHeader(
+    res,
+    `${EDGE_AUTH_COOKIE_NAME}=${EDGE_AUTH_COOKIE_TOKEN}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${secure}`,
+  );
+}
+
 function setAuthCookie(req, res, sessionId, expiresAt) {
   const ttlMs = Math.max(0, expiresAt - now());
   const maxAge = Math.floor(ttlMs / 1000);
@@ -319,6 +350,7 @@ function setAuthCookie(req, res, sessionId, expiresAt) {
     res,
     `${AUTH_SESSION_COOKIE}=${value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${secure}`,
   );
+  setEdgePasswordGateCookie(req, res);
 }
 
 function clearAuthCookie(req, res) {
